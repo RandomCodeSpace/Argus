@@ -1,4 +1,10 @@
 $ErrorActionPreference = "Stop"
+Stop-Process -Name "orderservice", "paymentservice" -ErrorAction SilentlyContinue -Force
+# 2. Start Order Service (Air)
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd 'd:\Development\CodeName Argus\test\orderservice'; air" -WindowStyle Minimized
+
+# 3. Start Payment Service (Air)
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd 'd:\Development\CodeName Argus\test\paymentservice'; air" -WindowStyle Minimized
 
 Write-Host "Starting ARGUS Load Test..." -ForegroundColor Cyan
 
@@ -31,5 +37,5 @@ for ($i = 0; $i -lt $concurrent; $i++) {
 Write-Host "$concurrent jobs started. Waiting for completion..."
 Wait-Job -Job $jobs | Out-Null
 Receive-Job -Job $jobs | Group-Object | Format-Table Count, Name -AutoSize
-
+Stop-Process -Name "orderservice", "paymentservice" -ErrorAction SilentlyContinue -Force
 Write-Host "Load test complete." -ForegroundColor Green

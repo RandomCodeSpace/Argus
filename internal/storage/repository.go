@@ -41,12 +41,12 @@ func NewRepository() (*Repository, error) {
 		}
 		dialector = sqlite.Open(dsn)
 	default:
-		// Default to mysql if not specified
-		log.Println("DB_DRIVER not set or invalid, defaulting to mysql")
+		// Default to sqlite if not specified for zero-config startup
+		log.Println("DB_DRIVER not set, defaulting to sqlite (argus.db)")
 		if dsn == "" {
-			dsn = "root:admin@tcp(10.0.0.2:3306)/argus?charset=utf8mb4&parseTime=True&loc=Local"
+			dsn = "argus.db"
 		}
-		dialector = mysql.Open(dsn)
+		dialector = sqlite.Open(dsn)
 	}
 
 	db, err := gorm.Open(dialector, &gorm.Config{
