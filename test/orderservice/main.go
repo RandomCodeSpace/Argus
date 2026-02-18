@@ -35,7 +35,6 @@ func initTracer() func(context.Context) error {
 		log.Fatalf("failed to create resource: %v", err)
 	}
 
-	// Connect to ARGUS at localhost:4317
 	traceClient := otlptracegrpc.NewClient(
 		otlptracegrpc.WithInsecure(),
 		otlptracegrpc.WithEndpoint("localhost:4317"),
@@ -67,7 +66,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/order", otelhttp.NewHandler(http.HandlerFunc(handleOrder), "POST /order"))
 
-	log.Println("Order Service listening on :9001")
+	log.Println("🛒 Order Service listening on :9001")
 	log.Fatal(http.ListenAndServe(":9001", mux))
 }
 
@@ -75,31 +74,33 @@ func handleOrder(w http.ResponseWriter, r *http.Request) {
 	ctx, span := tracer.Start(r.Context(), "process_order")
 	defer span.End()
 
-	// Chaos: 30% chance of latency (500ms)
+	orderID := fmt.Sprintf("ORD-%d", rand.Intn(100000))
+	span.SetAttributes(
+		attribute.String("order.id", orderID),
+	)
+	span.AddEvent("order_received", trace.WithAttributes(attribute.String("order.id", orderID)))
+
+	// Chaos: 30% chance of random latency (100-800ms)
 	if rand.Intn(100) < 30 {
-		span.AddEvent("sleeping_simulated_latency_500ms")
-		time.Sleep(500 * time.Millisecond)
+		latency := time.Duration(100+rand.Intn(700)) * time.Millisecond
+		span.AddEvent("chaos_latency_injected", trace.WithAttributes(
+			attribute.String("latency", latency.String()),
+		))
+		time.Sleep(latency)
 	}
 
-	// Chaos: 10% chance of inventory error
-	if rand.Intn(100) < 10 {
-		err := fmt.Errorf("Inventory Critical Error: SKU Not Found")
-		span.RecordError(err)
-		span.SetAttributes(attribute.String("error.type", "inventory_failure"))
-		span.SetStatus(codes.Error, err.Error())
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Call Payment Service
+	// Call Payment Service (Service B)
+	span.AddEvent("processing_payment", trace.WithAttributes(attribute.String("upstream", "payment-service")))
 	if err := callPaymentService(ctx); err != nil {
 		span.RecordError(err)
-		http.Error(w, "Payment Failed", http.StatusBadGateway)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "Payment Failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 
+	span.AddEvent("order_completed", trace.WithAttributes(attribute.String("status", "success")))
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Order Placed"))
+	w.Write([]byte("Order Placed Successfully"))
 }
 
 func callPaymentService(ctx context.Context) error {

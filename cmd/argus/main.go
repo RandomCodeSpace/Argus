@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,7 +18,10 @@ import (
 	"github.com/RandomCodeSpace/Project-Argus/internal/api"
 	"github.com/RandomCodeSpace/Project-Argus/internal/config"
 	"github.com/RandomCodeSpace/Project-Argus/internal/ingest"
+	"github.com/RandomCodeSpace/Project-Argus/internal/queue"
+	"github.com/RandomCodeSpace/Project-Argus/internal/realtime"
 	"github.com/RandomCodeSpace/Project-Argus/internal/storage"
+	"github.com/RandomCodeSpace/Project-Argus/internal/telemetry"
 	"github.com/RandomCodeSpace/Project-Argus/web"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -30,41 +36,101 @@ func main() {
 
 	// 0. Load Configuration
 	cfg := config.Load()
-	log.Printf("🚀 Starting Argus in %s mode", cfg.Env)
 
-	// 1. Initialize Storage
-	// repository.go already reads DB_DRIVER and DB_DSN from env,
-	// which godotenv has now populated.
+	// Initialize structured logger
+	var level slog.Level
+	switch strings.ToUpper(cfg.LogLevel) {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+	}))
+	slog.SetDefault(logger)
+
+	slog.Info("🚀 Starting Argus V5.0", "env", cfg.Env, "log_level", level)
+
+	// 1. Initialize Internal Telemetry (first — everything registers metrics against this)
+	metrics := telemetry.New()
+	slog.Info("📊 Internal telemetry initialized")
+
+	// 2. Initialize Storage
 	repo, err := storage.NewRepository()
 	if err != nil {
 		log.Fatalf("Failed to initialize repository: %v", err)
 	}
+	slog.Info("💾 Storage initialized", "driver", cfg.DBDriver)
 
-	// 2. Initialize AI Service
+	// 3. Initialize DLQ (Dead Letter Queue)
+	replayInterval, err := time.ParseDuration(cfg.DLQReplayInterval)
+	if err != nil {
+		replayInterval = 5 * time.Minute
+	}
+
+	dlq, err := queue.NewDLQ(cfg.DLQPath, replayInterval, func(data []byte) error {
+		// Replay handler: try to deserialize and re-insert logs
+		var logs []storage.Log
+		if err := json.Unmarshal(data, &logs); err != nil {
+			return fmt.Errorf("DLQ replay unmarshal failed: %w", err)
+		}
+		return repo.BatchCreateLogs(logs)
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialize DLQ: %v", err)
+	}
+	defer dlq.Stop()
+	slog.Info("🔁 DLQ initialized", "path", cfg.DLQPath, "interval", replayInterval)
+
+	// 4. Initialize Real-Time WebSocket Hub
+	hub := realtime.NewHub(func(count int) {
+		metrics.SetActiveConnections(count)
+	})
+	go hub.Run()
+	defer hub.Stop()
+	slog.Info("🔌 WebSocket hub started")
+
+	// 5. Initialize AI Service
 	aiService := ai.NewService(repo)
 	defer aiService.Stop()
 
-	// 3. Initialize API Server
-	apiServer := api.NewServer(repo)
+	// 6. Initialize API Server
+	apiServer := api.NewServer(repo, hub, metrics)
 
-	// 4. Initialize OTLP Ingestion (gRPC)
-	traceServer := ingest.NewTraceServer(repo)
-	logsServer := ingest.NewLogsServer(repo)
+	// 7. Initialize OTLP Ingestion (gRPC)
+	traceServer := ingest.NewTraceServer(repo, cfg)
+	logsServer := ingest.NewLogsServer(repo, cfg)
 
-	// Wire up live log streaming
-	// When a log arrives, ingest -> api.BroadcastLog
+	// Wire up live log streaming + AI + DLQ metrics
 	logHandler := func(l storage.Log) {
 		start := time.Now()
 		apiServer.BroadcastLog(l)
-		// AI Analysis Trigger
 		aiService.EnqueueLog(l)
 		if time.Since(start) > 100*time.Millisecond {
-			log.Println("Slow broadcast/enqueue took", time.Since(start))
+			slog.Warn("Slow broadcast/enqueue", "duration", time.Since(start))
 		}
 	}
 
 	logsServer.SetLogCallback(logHandler)
 	traceServer.SetLogCallback(logHandler)
+
+	// Update DLQ size metric periodically
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				metrics.SetDLQSize(dlq.Size())
+			}
+		}
+	}()
 
 	// Start gRPC Server
 	lis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
@@ -77,13 +143,13 @@ func main() {
 	reflection.Register(grpcServer)
 
 	go func() {
-		log.Printf("Starting gRPC OTLP receiver on :%s", cfg.GRPCPort)
+		slog.Info("📡 gRPC OTLP receiver started", "port", cfg.GRPCPort)
 		if err := grpcServer.Serve(lis); err != nil {
 			log.Fatalf("Failed to serve gRPC: %v", err)
 		}
 	}()
 
-	// 5. Start HTTP Server
+	// 8. Start HTTP Server
 	mux := http.NewServeMux()
 	apiServer.RegisterRoutes(mux)
 
@@ -104,13 +170,12 @@ func main() {
 
 		f, err := distFS.Open(path)
 		if err == nil {
-			// File exists, serve it
 			f.Close()
 			fileServer.ServeHTTP(w, r)
 			return
 		}
 
-		// File does not exist, serve index.html (SPA catch-all)
+		// SPA catch-all → serve index.html
 		f, err = distFS.Open("index.html")
 		if err != nil {
 			http.Error(w, "index.html not found", http.StatusInternalServerError)
@@ -131,39 +196,40 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Starting HTTP Server on :%s", cfg.HTTPPort)
+		slog.Info("🌐 HTTP server started", "port", cfg.HTTPPort)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP server failed: %v", err)
 		}
 	}()
 
-	// 6. Graceful Shutdown
+	// 9. Graceful Shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
-	log.Println("Shutting down...")
+	slog.Info("Shutting down ARGUS V5.0...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	grpcServer.GracefulStop()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("HTTP server forced to shutdown: %v", err)
+		slog.Error("HTTP server forced shutdown", "error", err)
 	}
 
-	log.Println("Server exited")
+	slog.Info("✅ ARGUS V5.0 shutdown complete")
 }
 
 func printBanner() {
 	banner := `
-    _    ____   ____ _   _ ____   __     ______  
-   / \  |  _ \ / ___| | | / ___|  \ \   / /___ \ 
-  / _ \ | |_) | |  _| | | \___ \   \ \ / /  __) |
- / ___ \|  _ <| |_| | |_| |___) |   \ V /  / __/ 
-/_/   \_\_| \_\\____|\___/|____/     \_/  |_____|
+     _    ____   ____ _   _ ____   __     _____  ___  
+    / \  |  _ \ / ___| | | / ___|  \ \   / / ___|| _ \ 
+   / _ \ | |_) | |  _| | | \___ \   \ \ / /|___ \| | | |
+  / ___ \|  _ <| |_| | |_| |___) |   \ V /  ___) | |_| |
+ /_/   \_\_| \_\\____|\\___/|____/     \_/  |____/|___/ 
 
-Project ARGUS V2: Enterprise Edition - All Systems Nominal
+ ARGUS V5.0 (DEV MODE) — Production Hardened Edition
+ The Eye That Never Sleeps 👁️
 `
 	fmt.Println(banner)
 }

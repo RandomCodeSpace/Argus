@@ -170,3 +170,29 @@ func (s *Server) handleGetDashboardStats(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
 }
+
+// handleGetServiceMapMetrics handles GET /api/metrics/service-map
+func (s *Server) handleGetServiceMapMetrics(w http.ResponseWriter, r *http.Request) {
+	end := time.Now()
+	start := end.Add(-30 * time.Minute)
+
+	if startStr := r.URL.Query().Get("start"); startStr != "" {
+		if t, err := time.Parse(time.RFC3339, startStr); err == nil {
+			start = t
+		}
+	}
+	if endStr := r.URL.Query().Get("end"); endStr != "" {
+		if t, err := time.Parse(time.RFC3339, endStr); err == nil {
+			end = t
+		}
+	}
+
+	metrics, err := s.repo.GetServiceMapMetrics(start, end)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}

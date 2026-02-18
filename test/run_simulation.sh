@@ -1,0 +1,83 @@
+#!/bin/bash
+# ARGUS V5.0 Chaos Test Simulation
+# Starts all 3 test services, runs load test, then cleanup
+
+set -e
+
+echo "================================"
+echo " ARGUS V5.0 Chaos Simulation"
+echo "================================"
+echo ""
+
+# Build services
+echo "[1/4] Building test services..."
+go build -o ./tmp/orderservice ./test/orderservice
+go build -o ./tmp/paymentservice ./test/paymentservice
+go build -o ./tmp/inventoryservice ./test/inventoryservice
+echo "✅ All services built"
+
+# Start services in background
+echo "[2/4] Starting services..."
+./tmp/inventoryservice &
+PID_INVENTORY=$!
+sleep 1
+
+./tmp/paymentservice &
+PID_PAYMENT=$!
+sleep 1
+
+./tmp/orderservice &
+PID_ORDER=$!
+sleep 1
+
+echo "✅ All services started"
+echo "  📦 Inventory Service (PID: $PID_INVENTORY) → :9003"
+echo "  💳 Payment Service   (PID: $PID_PAYMENT)   → :9002"
+echo "  🛒 Order Service     (PID: $PID_ORDER)     → :9001"
+
+# Cleanup on exit
+cleanup() {
+    echo ""
+    echo "[4/4] Cleaning up..."
+    kill $PID_ORDER $PID_PAYMENT $PID_INVENTORY 2>/dev/null || true
+    rm -f ./tmp/orderservice ./tmp/paymentservice ./tmp/inventoryservice
+    echo "✅ All services stopped"
+}
+trap cleanup EXIT INT TERM
+
+# Run load test
+echo ""
+echo "[3/4] Running load test (60 seconds)..."
+echo ""
+
+TOTAL=0
+SUCCESS=0
+FAILURE=0
+
+for i in $(seq 1 300); do
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:9001/order 2>/dev/null || echo "000")
+    TOTAL=$((TOTAL + 1))
+    
+    if [ "$STATUS" = "200" ]; then
+        SUCCESS=$((SUCCESS + 1))
+    else
+        FAILURE=$((FAILURE + 1))
+    fi
+    
+    # Print progress every 30 requests
+    if [ $((TOTAL % 30)) -eq 0 ]; then
+        echo "  📊 Progress: $TOTAL requests | ✅ $SUCCESS | ❌ $FAILURE"
+    fi
+    
+    sleep 0.2
+done
+
+echo ""
+echo "================================"
+echo " Simulation Complete"
+echo "================================"
+echo " Total Requests: $TOTAL"
+echo " Successful:     $SUCCESS"
+echo " Failed:         $FAILURE"
+echo " Error Rate:     $(echo "scale=1; $FAILURE * 100 / $TOTAL" | bc)%"
+echo "================================"

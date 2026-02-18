@@ -5,22 +5,26 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
+	"github.com/RandomCodeSpace/Project-Argus/internal/realtime"
 	"github.com/RandomCodeSpace/Project-Argus/internal/storage"
+	"github.com/RandomCodeSpace/Project-Argus/internal/telemetry"
 )
 
+// Server handles HTTP API requests.
 type Server struct {
-	repo         *storage.Repository
-	logClients   map[chan storage.Log]bool
-	logClientsMu sync.Mutex
+	repo    *storage.Repository
+	hub     *realtime.Hub
+	metrics *telemetry.Metrics
 }
 
-func NewServer(repo *storage.Repository) *Server {
+// NewServer creates a new API server.
+func NewServer(repo *storage.Repository, hub *realtime.Hub, metrics *telemetry.Metrics) *Server {
 	return &Server{
-		repo:       repo,
-		logClients: make(map[chan storage.Log]bool),
+		repo:    repo,
+		hub:     hub,
+		metrics: metrics,
 	}
 }
 
@@ -31,26 +35,41 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/metrics/traffic", s.handleGetTrafficMetrics)
 	mux.HandleFunc("GET /api/metrics/latency_heatmap", s.handleGetLatencyHeatmap)
 	mux.HandleFunc("GET /api/metrics/dashboard", s.handleGetDashboardStats)
-	mux.HandleFunc("GET /api/logs", s.handleGetLogsV2) // Replaces old simple handleGetLogs
-	mux.HandleFunc("GET /api/logs/stream", s.handleStreamLogs)
+	mux.HandleFunc("GET /api/metrics/service-map", s.handleGetServiceMapMetrics)
+	mux.HandleFunc("GET /api/logs", s.handleGetLogsV2)
 	mux.HandleFunc("GET /api/logs/context", s.handleGetLogContext)
 	mux.HandleFunc("GET /api/logs/{id}/insight", s.handleGetLogInsight)
+	mux.HandleFunc("GET /api/metadata/services", s.handleGetServices)
+	mux.HandleFunc("GET /api/health", s.metrics.HealthHandler())
+	mux.Handle("GET /metrics", telemetry.PrometheusHandler())
+	mux.HandleFunc("/ws", s.hub.HandleWebSocket)
+	mux.HandleFunc("DELETE /api/admin/purge", s.handlePurge)
+	mux.HandleFunc("POST /api/admin/vacuum", s.handleVacuum)
 }
 
-// BroadcastLog sends a new log entry to all connected SSE clients.
-// This should be called by the ingestion layer or a background worker.
+// BroadcastLog sends a log entry to the buffered WebSocket hub.
 func (s *Server) BroadcastLog(l storage.Log) {
-	s.logClientsMu.Lock()
-	defer s.logClientsMu.Unlock()
+	s.hub.Broadcast(realtime.LogEntry{
+		ID:             l.ID,
+		TraceID:        l.TraceID,
+		SpanID:         l.SpanID,
+		Severity:       l.Severity,
+		Body:           l.Body,
+		ServiceName:    l.ServiceName,
+		AttributesJSON: l.AttributesJSON,
+		AIInsight:      l.AIInsight,
+		Timestamp:      l.Timestamp,
+	})
+}
 
-	for ch := range s.logClients {
-		select {
-		case ch <- l:
-		default:
-			// If client is slow, drop the message or close connection?
-			// For now, drop to avoid blocking.
-		}
+func (s *Server) handleGetServices(w http.ResponseWriter, r *http.Request) {
+	services, err := s.repo.GetServices()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(services)
 }
 
 // parseTimeRange parses start and end times from request query parameters
@@ -82,7 +101,6 @@ func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTraces(w http.ResponseWriter, r *http.Request) {
-	// Parse pagination
 	limit := 20
 	offset := 0
 	if l := r.URL.Query().Get("limit"); l != "" {
@@ -96,28 +114,18 @@ func (s *Server) handleGetTraces(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Parse time range
 	start, end, err := parseTimeRange(r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Invalid time range: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Parse service names
 	serviceNames := r.URL.Query()["service_name"]
-
-	// Parse status filter
 	status := r.URL.Query().Get("status")
-
-	// Parse search (trace ID)
-	// Parse search (trace ID)
 	search := r.URL.Query().Get("search")
-
-	// Parse sorting
 	sortBy := r.URL.Query().Get("sort_by")
 	orderBy := r.URL.Query().Get("order_by")
 
-	// Fetch filtered traces
 	response, err := s.repo.GetTracesFiltered(start, end, serviceNames, status, search, limit, offset, sortBy, orderBy)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -126,58 +134,6 @@ func (s *Server) handleGetTraces(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
-}
-
-func (s *Server) handleStreamLogs(w http.ResponseWriter, r *http.Request) {
-	// Set headers for SSE
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	// Create a channel for this client
-	clientChan := make(chan storage.Log, 10)
-
-	// Register client
-	s.logClientsMu.Lock()
-	s.logClients[clientChan] = true
-	s.logClientsMu.Unlock()
-
-	// Ensure cleanup on disconnect
-	defer func() {
-		s.logClientsMu.Lock()
-		delete(s.logClients, clientChan)
-		close(clientChan)
-		s.logClientsMu.Unlock()
-	}()
-
-	// Send a keep-alive ticker
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-			fmt.Fprintf(w, ": keep-alive\n\n")
-			flusher.Flush()
-		case logEntry := <-clientChan:
-			// Format as SSE event
-			data, err := json.Marshal(logEntry)
-			if err != nil {
-				continue
-			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-		}
-	}
 }
 
 func (s *Server) handleGetLogInsight(w http.ResponseWriter, r *http.Request) {
@@ -200,4 +156,44 @@ func (s *Server) handleGetLogInsight(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"insight": l.AIInsight})
+}
+
+func (s *Server) handlePurge(w http.ResponseWriter, r *http.Request) {
+	// Default: purge data older than 7 days
+	days := 7
+	if d := r.URL.Query().Get("days"); d != "" {
+		if v, err := strconv.Atoi(d); err == nil && v > 0 {
+			days = v
+		}
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -days)
+
+	logsDeleted, err := s.repo.PurgeLogs(cutoff)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	tracesDeleted, err := s.repo.PurgeTraces(cutoff)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"logs_purged":   logsDeleted,
+		"traces_purged": tracesDeleted,
+		"cutoff":        cutoff,
+	})
+}
+
+func (s *Server) handleVacuum(w http.ResponseWriter, _ *http.Request) {
+	if err := s.repo.VacuumDB(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "vacuumed"})
 }

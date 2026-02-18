@@ -1,5 +1,10 @@
-import { type ThemeConfig, theme } from 'antd';
+import { createTheme } from '@mantine/core'
 
-export const cyberTheme: ThemeConfig = {
-    algorithm: theme.defaultAlgorithm,
-};
+export const theme = createTheme({
+    primaryColor: 'indigo',
+    fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+    headings: {
+        fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+    },
+    defaultRadius: 'md',
+})

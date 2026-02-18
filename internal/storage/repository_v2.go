@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -12,8 +13,9 @@ import (
 
 // TrafficPoint represents a data point for the traffic chart.
 type TrafficPoint struct {
-	Timestamp time.Time `json:"timestamp"`
-	Count     int64     `json:"count"`
+	Timestamp  time.Time `json:"timestamp"`
+	Count      int64     `json:"count"`
+	ErrorCount int64     `json:"error_count"`
 }
 
 // LatencyPoint represents a data point for the latency heatmap.
@@ -24,16 +26,21 @@ type LatencyPoint struct {
 
 // ServiceError represents error counts per service.
 type ServiceError struct {
-	ServiceName string `json:"service_name"`
-	ErrorCount  int64  `json:"error_count"`
+	ServiceName string  `json:"service_name"`
+	ErrorCount  int64   `json:"error_count"`
+	TotalCount  int64   `json:"total_count"`
+	ErrorRate   float64 `json:"error_rate"`
 }
 
 // DashboardStats represents aggregated metrics for the dashboard.
 type DashboardStats struct {
 	TotalTraces        int64          `json:"total_traces"`
-	ErrorRate          float64        `json:"error_rate"`      // Percentage
-	ActiveServices     int64          `json:"active_services"` // Count of unique services
-	P99Latency         int64          `json:"p99_latency"`     // Microseconds
+	TotalLogs          int64          `json:"total_logs"`
+	TotalErrors        int64          `json:"total_errors"`
+	AvgLatencyMs       float64        `json:"avg_latency_ms"`
+	ErrorRate          float64        `json:"error_rate"`
+	ActiveServices     int64          `json:"active_services"`
+	P99Latency         int64          `json:"p99_latency"`
 	TopFailingServices []ServiceError `json:"top_failing_services"`
 }
 
@@ -48,39 +55,55 @@ type LogFilter struct {
 	Offset      int
 }
 
-// GetTrafficMetrics returns request counts bucketed by minute.
+// GetTrafficMetrics returns request counts bucketed by minute, including error counts.
 func (r *Repository) GetTrafficMetrics(start, end time.Time, serviceNames []string) ([]TrafficPoint, error) {
 	var points []TrafficPoint
-	var traces []Trace
+
+	// Fetch timestamps + status for traffic + error breakdown
+	type traceRow struct {
+		Timestamp time.Time
+		Status    string
+	}
+	var rows []traceRow
 
 	query := r.db.Model(&Trace{}).
-		Select("timestamp").
+		Select("timestamp, status").
 		Where("timestamp BETWEEN ? AND ?", start, end)
 
 	if len(serviceNames) > 0 {
 		query = query.Where("service_name IN ?", serviceNames)
 	}
 
-	err := query.Find(&traces).Error
-
-	if err != nil {
+	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
 
-	buckets := make(map[int64]int64)
-	for _, t := range traces {
-		bucket := t.Timestamp.Truncate(time.Minute).Unix()
-		buckets[bucket]++
+	type bucket struct {
+		count      int64
+		errorCount int64
+	}
+	buckets := make(map[int64]*bucket)
+	for _, r := range rows {
+		ts := r.Timestamp.Truncate(time.Minute).Unix()
+		b, ok := buckets[ts]
+		if !ok {
+			b = &bucket{}
+			buckets[ts] = b
+		}
+		b.count++
+		if strings.Contains(r.Status, "ERROR") {
+			b.errorCount++
+		}
 	}
 
-	for ts, count := range buckets {
+	for ts, b := range buckets {
 		points = append(points, TrafficPoint{
-			Timestamp: time.Unix(ts, 0),
-			Count:     count,
+			Timestamp:  time.Unix(ts, 0),
+			Count:      b.count,
+			ErrorCount: b.errorCount,
 		})
 	}
 
-	// Sort points by timestamp
 	sort.Slice(points, func(i, j int) bool {
 		return points[i].Timestamp.Before(points[j].Timestamp)
 	})
@@ -122,29 +145,48 @@ func (r *Repository) GetDashboardStats(start, end time.Time, serviceNames []stri
 	if err := baseQuery.Session(&gorm.Session{}).Count(&stats.TotalTraces).Error; err != nil {
 		return nil, fmt.Errorf("failed to count traces: %w", err)
 	}
-	log.Printf("   🔍 DB Count: %d traces found for period", stats.TotalTraces)
 
-	// 2. Error Rate
-	var errorTraces int64
+	// 2. Total Logs
+	logQuery := r.db.Model(&Log{}).Where("timestamp BETWEEN ? AND ?", start, end)
+	if len(serviceNames) > 0 {
+		logQuery = logQuery.Where("service_name IN ?", serviceNames)
+	}
+	if err := logQuery.Count(&stats.TotalLogs).Error; err != nil {
+		return nil, fmt.Errorf("failed to count logs: %w", err)
+	}
+
+	// 3. Total Errors (traces with error status)
 	if err := baseQuery.Session(&gorm.Session{}).
-		Where("status LIKE ?", "%STATUS_CODE_ERROR%").
-		Count(&errorTraces).Error; err != nil {
+		Where("status LIKE ?", "%ERROR%").
+		Count(&stats.TotalErrors).Error; err != nil {
 		return nil, fmt.Errorf("failed to count error traces: %w", err)
 	}
 
 	if stats.TotalTraces > 0 {
-		stats.ErrorRate = (float64(errorTraces) / float64(stats.TotalTraces)) * 100
+		stats.ErrorRate = (float64(stats.TotalErrors) / float64(stats.TotalTraces)) * 100
 	}
 
-	// 3. Active Services
+	// 4. Average Latency (microseconds → milliseconds)
+	type avgResult struct {
+		Avg float64
+	}
+	var avg avgResult
+	if err := baseQuery.Session(&gorm.Session{}).
+		Select("COALESCE(AVG(duration), 0) as avg").
+		Scan(&avg).Error; err != nil {
+		log.Printf("⚠️ Failed to compute avg latency: %v", err)
+	} else {
+		stats.AvgLatencyMs = avg.Avg / 1000.0 // microseconds → ms
+	}
+
+	// 5. Active Services
 	if err := baseQuery.Session(&gorm.Session{}).
 		Distinct("service_name").
 		Count(&stats.ActiveServices).Error; err != nil {
 		return nil, fmt.Errorf("failed to count active services: %w", err)
 	}
 
-	// 4. P99 Latency
-	// Fetch all durations, sort, pick 99th percentile.
+	// 6. P99 Latency
 	var durations []int64
 	if err := baseQuery.Session(&gorm.Session{}).
 		Select("duration").
@@ -164,19 +206,34 @@ func (r *Repository) GetDashboardStats(start, end time.Time, serviceNames []stri
 		stats.P99Latency = durations[p99Index]
 	}
 
-	// 5. Top Failing Services
-	// We need a fresh session because previous ones might have modified the query scope implicitly if not careful,
-	// but here we use baseQuery.Session() which is safe.
-	// However, Group() and Order() might persist if applied to baseQuery directly.
-	// We use scoping carefully.
+	// 7. Top Failing Services (with error rate)
+	type svcCount struct {
+		ServiceName string
+		ErrorCount  int64
+		TotalCount  int64
+	}
+	var svcCounts []svcCount
 	if err := baseQuery.Session(&gorm.Session{}).
-		Select("service_name, count(*) as error_count").
-		Where("status LIKE ?", "%STATUS_CODE_ERROR%").
+		Select("service_name, COUNT(*) as total_count, SUM(CASE WHEN status LIKE '%ERROR%' THEN 1 ELSE 0 END) as error_count").
 		Group("service_name").
+		Having("error_count > 0").
 		Order("error_count DESC").
 		Limit(5).
-		Scan(&stats.TopFailingServices).Error; err != nil {
-		return nil, fmt.Errorf("failed to fetch top failing services: %w", err)
+		Scan(&svcCounts).Error; err != nil {
+		log.Printf("⚠️ Failed to fetch top failing services: %v", err)
+	} else {
+		for _, sc := range svcCounts {
+			rate := 0.0
+			if sc.TotalCount > 0 {
+				rate = float64(sc.ErrorCount) / float64(sc.TotalCount)
+			}
+			stats.TopFailingServices = append(stats.TopFailingServices, ServiceError{
+				ServiceName: sc.ServiceName,
+				ErrorCount:  sc.ErrorCount,
+				TotalCount:  sc.TotalCount,
+				ErrorRate:   rate,
+			})
+		}
 	}
 
 	return &stats, nil
@@ -250,6 +307,17 @@ func (r *Repository) GetTracesFiltered(start, end time.Time, serviceNames []stri
 		return nil, fmt.Errorf("failed to fetch traces: %w", err)
 	}
 
+	// Populate virtual fields for frontend
+	for i := range traces {
+		traces[i].SpanCount = len(traces[i].Spans)
+		traces[i].DurationMs = float64(traces[i].Duration) / 1000.0
+		if traces[i].SpanCount > 0 {
+			traces[i].Operation = traces[i].Spans[0].OperationName
+		} else {
+			traces[i].Operation = "Unknown"
+		}
+	}
+
 	return &TracesResponse{
 		Traces: traces,
 		Total:  total,
@@ -279,7 +347,7 @@ func (r *Repository) GetLogsV2(filter LogFilter) ([]Log, int64, error) {
 	}
 	if filter.Search != "" {
 		search := "%" + filter.Search + "%"
-		query = query.Where("body LIKE ? OR trace_id = ?", search, filter.Search)
+		query = query.Where("body LIKE ? OR trace_id LIKE ?", search, search)
 	}
 
 	// Count total for pagination
@@ -310,4 +378,185 @@ func (r *Repository) GetLogContext(targetTime time.Time) ([]Log, error) {
 		return nil, err
 	}
 	return logs, nil
+}
+
+// ServiceMapNode represents a single service node on the service map.
+type ServiceMapNode struct {
+	Name         string  `json:"name"`
+	TotalTraces  int64   `json:"total_traces"`
+	ErrorCount   int64   `json:"error_count"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+}
+
+// ServiceMapEdge represents a connection between two services.
+type ServiceMapEdge struct {
+	Source       string  `json:"source"`
+	Target       string  `json:"target"`
+	CallCount    int64   `json:"call_count"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+	ErrorRate    float64 `json:"error_rate"`
+}
+
+// ServiceMapMetrics holds the complete service topology with metrics.
+type ServiceMapMetrics struct {
+	Nodes []ServiceMapNode `json:"nodes"`
+	Edges []ServiceMapEdge `json:"edges"`
+}
+
+// GetServiceMapMetrics computes per-service and per-edge metrics from traces and spans.
+func (r *Repository) GetServiceMapMetrics(start, end time.Time) (*ServiceMapMetrics, error) {
+	// 1. Per-service node metrics from traces
+	type nodeRow struct {
+		ServiceName string
+		Total       int64
+		Errors      int64
+		AvgDuration float64
+	}
+	var nodeRows []nodeRow
+
+	nodeQuery := r.db.Model(&Trace{}).
+		Select("service_name, COUNT(*) as total, SUM(CASE WHEN status LIKE '%ERROR%' THEN 1 ELSE 0 END) as errors, AVG(duration) as avg_duration").
+		Group("service_name")
+
+	if !start.IsZero() && !end.IsZero() {
+		nodeQuery = nodeQuery.Where("timestamp BETWEEN ? AND ?", start, end)
+	}
+
+	if err := nodeQuery.Find(&nodeRows).Error; err != nil {
+		return nil, fmt.Errorf("failed to get service map nodes: %w", err)
+	}
+
+	nodes := make([]ServiceMapNode, 0, len(nodeRows))
+	for _, nr := range nodeRows {
+		if nr.ServiceName == "" {
+			continue
+		}
+		nodes = append(nodes, ServiceMapNode{
+			Name:         nr.ServiceName,
+			TotalTraces:  nr.Total,
+			ErrorCount:   nr.Errors,
+			AvgLatencyMs: math.Round(nr.AvgDuration/1000*100) / 100, // µs → ms
+		})
+	}
+
+	// 2. Per-edge metrics: find traces that span multiple services via spans table
+	type spanRow struct {
+		TraceID       string
+		OperationName string
+		Duration      int64
+		Status        string
+	}
+
+	// Get all spans in the time range, grouped by trace
+	var spans []Span
+	spanQuery := r.db.Model(&Span{})
+	if !start.IsZero() && !end.IsZero() {
+		// Join with traces to filter by time range
+		spanQuery = spanQuery.Joins("JOIN traces ON spans.trace_id = traces.trace_id").
+			Where("traces.timestamp BETWEEN ? AND ?", start, end)
+	}
+	if err := spanQuery.Find(&spans).Error; err != nil {
+		return nil, fmt.Errorf("failed to get spans for service map: %w", err)
+	}
+
+	// Build trace → services mapping from traces (not spans, since spans don't have service_name)
+	type traceInfo struct {
+		TraceID     string
+		ServiceName string
+		Status      string
+		Duration    int64
+	}
+	var traceInfos []traceInfo
+	tiQuery := r.db.Model(&Trace{}).Select("trace_id, service_name, status, duration")
+	if !start.IsZero() && !end.IsZero() {
+		tiQuery = tiQuery.Where("timestamp BETWEEN ? AND ?", start, end)
+	}
+	if err := tiQuery.Find(&traceInfos).Error; err != nil {
+		return nil, fmt.Errorf("failed to get trace infos: %w", err)
+	}
+
+	// Group by trace_id to find multi-service traces
+	traceServiceMap := make(map[string]map[string]struct {
+		count  int64
+		errors int64
+		totalD int64
+	})
+	for _, ti := range traceInfos {
+		if ti.ServiceName == "" {
+			continue
+		}
+		if _, ok := traceServiceMap[ti.TraceID]; !ok {
+			traceServiceMap[ti.TraceID] = make(map[string]struct {
+				count  int64
+				errors int64
+				totalD int64
+			})
+		}
+		entry := traceServiceMap[ti.TraceID][ti.ServiceName]
+		entry.count++
+		if strings.Contains(ti.Status, "ERROR") {
+			entry.errors++
+		}
+		entry.totalD += ti.Duration
+		traceServiceMap[ti.TraceID][ti.ServiceName] = entry
+	}
+
+	// Derive edges from traces that touch multiple services
+	type edgeKey struct{ source, target string }
+	edgeAgg := make(map[edgeKey]struct {
+		calls   int64
+		errors  int64
+		totalMs float64
+	})
+
+	for _, services := range traceServiceMap {
+		svcNames := make([]string, 0, len(services))
+		for name := range services {
+			svcNames = append(svcNames, name)
+		}
+		sort.Strings(svcNames)
+
+		for i := 0; i < len(svcNames); i++ {
+			for j := i + 1; j < len(svcNames); j++ {
+				key := edgeKey{source: svcNames[i], target: svcNames[j]}
+				entry := edgeAgg[key]
+				entry.calls++
+				// Use the average duration of both services for this edge
+				si := services[svcNames[i]]
+				sj := services[svcNames[j]]
+				avgD := float64(si.totalD+sj.totalD) / float64(si.count+sj.count) / 1000.0 // µs → ms
+				entry.totalMs += avgD
+				if si.errors > 0 || sj.errors > 0 {
+					entry.errors++
+				}
+				edgeAgg[key] = entry
+			}
+		}
+	}
+
+	edges := make([]ServiceMapEdge, 0, len(edgeAgg))
+	// Compute time range duration in minutes for calls/min
+	rangeMins := end.Sub(start).Minutes()
+	if rangeMins < 1 {
+		rangeMins = 1
+	}
+
+	for key, agg := range edgeAgg {
+		errRate := float64(0)
+		if agg.calls > 0 {
+			errRate = math.Round(float64(agg.errors)/float64(agg.calls)*1000) / 1000
+		}
+		edges = append(edges, ServiceMapEdge{
+			Source:       key.source,
+			Target:       key.target,
+			CallCount:    agg.calls,
+			AvgLatencyMs: math.Round(agg.totalMs/float64(agg.calls)*100) / 100,
+			ErrorRate:    errRate,
+		})
+	}
+
+	return &ServiceMapMetrics{
+		Nodes: nodes,
+		Edges: edges,
+	}, nil
 }

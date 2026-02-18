@@ -4,92 +4,39 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/glebarez/sqlite"
-	"gorm.io/driver/mysql"
-	"gorm.io/driver/sqlserver"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	"gorm.io/gorm/clause"
 )
 
+// Repository wraps the GORM database handle for all data access operations.
 type Repository struct {
-	db *gorm.DB
+	db     *gorm.DB
+	driver string
 }
 
-// NewRepository initializes the database connection and migrates the schema.
+// NewRepository initializes the database connection using environment variables and migrates the schema.
 func NewRepository() (*Repository, error) {
 	driver := os.Getenv("DB_DRIVER")
 	dsn := os.Getenv("DB_DSN")
 
-	var dialector gorm.Dialector
-
-	switch driver {
-	case "sqlserver":
-		if dsn == "" {
-			return nil, fmt.Errorf("DB_DSN environment variable is required for sqlserver driver")
-		}
-		dialector = sqlserver.Open(dsn)
-	case "mysql":
-		if dsn == "" {
-			dsn = "root:admin@tcp(10.0.0.2:3306)/argus?charset=utf8mb4&parseTime=True&loc=Local"
-		}
-		dialector = mysql.Open(dsn)
-	case "sqlite":
-		if dsn == "" {
-			dsn = "argus.db"
-		}
-		dialector = sqlite.Open(dsn)
-	default:
-		// Default to sqlite if not specified for zero-config startup
-		log.Println("DB_DRIVER not set, defaulting to sqlite (argus.db)")
-		if dsn == "" {
-			dsn = "argus.db"
-		}
-		driver = "sqlite" // Explicitly set driver to sqlite
-		dialector = sqlite.Open(dsn)
-	}
-
-	db, err := gorm.Open(dialector, &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Error),
-	})
+	db, err := NewDatabase(driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
+		return nil, err
 	}
 
-	// Configure Connection Pool
-	sqlDB, err := db.DB()
-	if err == nil {
-		sqlDB.SetMaxIdleConns(10)
-		sqlDB.SetMaxOpenConns(50)
-		sqlDB.SetConnMaxLifetime(time.Hour)
-		log.Printf("📊 Database Connection Pool Configured: MaxOpen=%d, MaxIdle=%d, Driver=%s", 50, 10, driver)
+	// Resolve effective driver name
+	if driver == "" {
+		driver = "sqlite"
 	}
 
-	// Migrations
-	// REMOVED DropTable to ensure persistence across restarts as requested.
-	// If you need a fresh DB, manually drop the 'argus' database in MySQL.
-
-	// Disable FK checks during migration to prevent constraint errors with orphaned data
-	if driver == "mysql" {
-		db.Exec("SET FOREIGN_KEY_CHECKS = 0")
-		log.Println("🔓 Disabled foreign key checks for migration")
+	if err := AutoMigrateModels(db, driver); err != nil {
+		return nil, err
 	}
 
-	// Ensure tables exist
-	if err := db.AutoMigrate(&Trace{}, &Span{}, &Log{}); err != nil {
-		return nil, fmt.Errorf("failed to migrate database: %w", err)
-	}
-
-	// Drop foreign keys that AutoMigrate may have created
-	if driver == "mysql" {
-		db.Exec("ALTER TABLE spans DROP FOREIGN KEY fk_traces_spans")
-		db.Exec("ALTER TABLE logs DROP FOREIGN KEY fk_traces_logs")
-		db.Exec("SET FOREIGN_KEY_CHECKS = 1")
-		log.Println("🔓 Dropped foreign key constraints for async ingestion compatibility")
-	}
-
-	return &Repository{db: db}, nil
+	return &Repository{db: db, driver: driver}, nil
 }
 
 // BatchCreateSpans inserts multiple spans in batches.
@@ -104,20 +51,17 @@ func (r *Repository) BatchCreateSpans(spans []Span) error {
 	return nil
 }
 
-// BatchCreateTraces inserts or updates multiple traces.
+// BatchCreateTraces inserts traces, skipping duplicates.
 func (r *Repository) BatchCreateTraces(traces []Trace) error {
 	if len(traces) == 0 {
 		return nil
 	}
-	// Using a transaction for batch upsert
-	return r.db.Transaction(func(tx *gorm.DB) error {
-		for _, t := range traces {
-			if err := tx.FirstOrCreate(&t, Trace{TraceID: t.TraceID}).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	// MySQL: INSERT IGNORE (avoids Error 1869 with auto-increment)
+	// SQLite/Postgres: ON CONFLICT DO NOTHING
+	if strings.ToLower(r.driver) == "mysql" {
+		return r.db.Clauses(clause.Insert{Modifier: "IGNORE"}).Create(&traces).Error
+	}
+	return r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&traces).Error
 }
 
 // BatchCreateLogs inserts multiple logs in batches.
@@ -132,18 +76,21 @@ func (r *Repository) BatchCreateLogs(logs []Log) error {
 	return nil
 }
 
-// CreateTrace inserts a new trace or updates an existing one if needed (mostly headers/root info).
-// Since we ingest spans, the Trace entity is often aggregate stats.
-// Here we might just create if not exists.
+// CreateTrace inserts a new trace, skipping if it already exists.
 func (r *Repository) CreateTrace(trace Trace) error {
-	// standard upsert or create
-	if err := r.db.FirstOrCreate(&trace, Trace{TraceID: trace.TraceID}).Error; err != nil {
-		return fmt.Errorf("failed to create trace: %w", err)
+	var tx *gorm.DB
+	if strings.ToLower(r.driver) == "mysql" {
+		tx = r.db.Clauses(clause.Insert{Modifier: "IGNORE"}).Create(&trace)
+	} else {
+		tx = r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&trace)
+	}
+	if tx.Error != nil {
+		return fmt.Errorf("failed to create trace: %w", tx.Error)
 	}
 	return nil
 }
 
-// GetRecentLogs returns the most recent logs, optionally filtered by severity.
+// GetRecentLogs returns the most recent logs.
 func (r *Repository) GetRecentLogs(limit int) ([]Log, error) {
 	var logs []Log
 	if err := r.db.Order("timestamp desc").Limit(limit).Find(&logs).Error; err != nil {
@@ -152,17 +99,16 @@ func (r *Repository) GetRecentLogs(limit int) ([]Log, error) {
 	return logs, nil
 }
 
-// GetTrace returns a trace by ID with its spans.
+// GetTrace returns a trace by ID with its spans and logs.
 func (r *Repository) GetTrace(traceID string) (*Trace, error) {
 	var trace Trace
-	// Preload spans for the trace
 	if err := r.db.Preload("Spans").Preload("Logs").Where("trace_id = ?", traceID).First(&trace).Error; err != nil {
 		return nil, fmt.Errorf("failed to get trace: %w", err)
 	}
 	return &trace, nil
 }
 
-// GetTraces returns a list of traces (pagination support simplified).
+// GetTraces returns a list of traces with pagination.
 func (r *Repository) GetTraces(limit int, offset int) ([]Trace, error) {
 	var traces []Trace
 	if err := r.db.Order("timestamp desc").Limit(limit).Offset(offset).Find(&traces).Error; err != nil {
@@ -188,7 +134,6 @@ func (r *Repository) GetStats() (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	// Assuming severity 'ERROR' for error logs
 	if err := r.db.Model(&Log{}).Where("severity = ?", "ERROR").Count(&errorCount).Error; err != nil {
 		return nil, err
 	}
@@ -206,4 +151,51 @@ func (r *Repository) GetLog(id uint) (*Log, error) {
 		return nil, fmt.Errorf("failed to get log: %w", err)
 	}
 	return &l, nil
+}
+
+// GetServices returns a list of all distinct service names seen in traces.
+func (r *Repository) GetServices() ([]string, error) {
+	var services []string
+	if err := r.db.Model(&Trace{}).Distinct("service_name").Order("service_name ASC").Pluck("service_name", &services).Error; err != nil {
+		return nil, fmt.Errorf("failed to get services: %w", err)
+	}
+	return services, nil
+}
+
+// PurgeLogs deletes logs older than the given timestamp.
+func (r *Repository) PurgeLogs(olderThan time.Time) (int64, error) {
+	result := r.db.Where("timestamp < ?", olderThan).Delete(&Log{})
+	if result.Error != nil {
+		return 0, fmt.Errorf("failed to purge logs: %w", result.Error)
+	}
+	log.Printf("🗑️ Purged %d logs older than %v", result.RowsAffected, olderThan)
+	return result.RowsAffected, nil
+}
+
+// PurgeTraces deletes traces older than the given timestamp.
+func (r *Repository) PurgeTraces(olderThan time.Time) (int64, error) {
+	result := r.db.Where("timestamp < ?", olderThan).Delete(&Trace{})
+	if result.Error != nil {
+		return 0, fmt.Errorf("failed to purge traces: %w", result.Error)
+	}
+	log.Printf("🗑️ Purged %d traces older than %v", result.RowsAffected, olderThan)
+	return result.RowsAffected, nil
+}
+
+// VacuumDB runs VACUUM on the database (SQLite only, no-op for others).
+func (r *Repository) VacuumDB() error {
+	if r.driver == "sqlite" {
+		if err := r.db.Exec("VACUUM").Error; err != nil {
+			return fmt.Errorf("failed to vacuum database: %w", err)
+		}
+		log.Println("🧹 Database vacuumed successfully")
+	} else {
+		log.Println("🧹 Vacuum is only applicable to SQLite; skipping for " + r.driver)
+	}
+	return nil
+}
+
+// DB returns the underlying gorm.DB for advanced queries.
+func (r *Repository) DB() *gorm.DB {
+	return r.db
 }

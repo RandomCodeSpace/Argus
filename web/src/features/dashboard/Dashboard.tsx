@@ -1,319 +1,194 @@
-import React, { useState, useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Row, Col, Card, Statistic, theme, Select, Button, Space, Skeleton, Empty } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
-import Highcharts from 'highcharts';
-import HighchartsReact from 'highcharts-react-official';
-import "highcharts/modules/heatmap";
+import { useEffect, useState, useMemo } from 'react'
+import {
+    Paper,
+    Group,
+    Title,
+    Select,
+    Stack,
+    SimpleGrid,
+    Text,
+    Badge,
+    ThemeIcon,
+    Box,
+} from '@mantine/core'
+import { useQuery } from '@tanstack/react-query'
+import ReactEChartsCore from 'echarts-for-react/lib/core'
+import * as echarts from 'echarts/core'
+import { LineChart, BarChart, HeatmapChart } from 'echarts/charts'
+import {
+    GridComponent,
+    TooltipComponent,
+    LegendComponent,
+    VisualMapComponent,
+} from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+import { Activity, AlertTriangle, Clock, Layers } from 'lucide-react'
+import type { TrafficPoint, ServiceError, DashboardStats } from '../../types'
+import { TimeRangeSelector, useTimeRange } from '../../components/TimeRangeSelector'
+import { useFilterParam } from '../../hooks/useFilterParams'
 
-// Ensure Highcharts is available globally for the heatmap module if needed
-if (typeof window !== 'undefined') {
-    (window as any).Highcharts = Highcharts;
-    // Set Highcharts to use local timezone (offset in minutes from UTC)
-    const timezoneOffset = new Date().getTimezoneOffset();
-    Highcharts.setOptions({
-        time: {
-            timezoneOffset: timezoneOffset
-        }
-    });
-}
+echarts.use([
+    LineChart, BarChart, HeatmapChart,
+    GridComponent, TooltipComponent, LegendComponent, VisualMapComponent,
+    CanvasRenderer,
+])
 
-// --- API Types ---
-interface DashboardStats {
-    total_traces: number;
-    error_rate: number;
-    active_services: number;
-    p99_latency: number;
-    top_failing_services: { service_name: string; error_count: number }[];
-}
+export function Dashboard() {
+    const tr = useTimeRange('15m')
+    const [selectedService, setSelectedService] = useFilterParam('service', null)
 
-interface TrafficPoint {
-    timestamp: string;
-    count: number;
-}
+    const { data: services } = useQuery<string[]>({
+        queryKey: ['services'],
+        queryFn: () => fetch('/api/metadata/services').then(r => r.json()),
+    })
 
-interface LatencyPoint {
-    timestamp: string;
-    duration: number;
-}
+    const serviceParams = selectedService ? `&service_name=${encodeURIComponent(selectedService)}` : ''
 
-// --- Fetch Functions ---
-const fetchDashboardStats = async (start?: string, end?: string, services?: string[]) => {
-    const params = new URLSearchParams();
-    if (start) params.append('start', start);
-    if (end) params.append('end', end);
-    services?.forEach(s => params.append('service_name', s));
-    const res = await fetch(`/api/metrics/dashboard?${params.toString()}`);
-    if (!res.ok) throw new Error('Failed to fetch stats');
-    return res.json() as Promise<DashboardStats>;
-};
+    const { data: traffic } = useQuery<TrafficPoint[]>({
+        queryKey: ['traffic', tr.start, tr.end, selectedService],
+        queryFn: () => fetch(`/api/metrics/traffic?start=${tr.start}&end=${tr.end}${serviceParams}`).then(r => r.json()),
+        refetchInterval: 30000,
+    })
 
-const fetchTraffic = async (start?: string, end?: string, services?: string[]) => {
-    const params = new URLSearchParams();
-    if (start) params.append('start', start);
-    if (end) params.append('end', end);
-    services?.forEach(s => params.append('service_name', s));
-    const res = await fetch(`/api/metrics/traffic?${params.toString()}`);
-    if (!res.ok) throw new Error('Failed to fetch traffic');
-    return res.json() as Promise<TrafficPoint[]>;
-};
+    const { data: topFailing } = useQuery<ServiceError[]>({
+        queryKey: ['topFailing', tr.start, tr.end],
+        queryFn: () => fetch(`/api/metrics/dashboard?start=${tr.start}&end=${tr.end}`).then(r => r.json()),
+        refetchInterval: 30000,
+        select: (data: any) => data?.top_failing_services || [],
+    })
 
-const fetchHeatmap = async (start?: string, end?: string, services?: string[]) => {
-    const params = new URLSearchParams();
-    if (start) params.append('start', start);
-    if (end) params.append('end', end);
-    services?.forEach(s => params.append('service_name', s));
-    const res = await fetch(`/api/metrics/latency_heatmap?${params.toString()}`);
-    if (!res.ok) throw new Error('Failed to fetch heatmap');
-    return res.json() as Promise<LatencyPoint[]>;
-};
+    const { data: stats } = useQuery<DashboardStats>({
+        queryKey: ['dashboardStats', tr.start, tr.end, selectedService],
+        queryFn: () => fetch(`/api/metrics/dashboard?start=${tr.start}&end=${tr.end}${serviceParams}`).then(r => r.json()),
+        refetchInterval: 30000,
+    })
 
-interface MetricCardProps {
-    title: string;
-    value?: number | string;
-    precision?: number;
-    suffix?: string;
-    color?: string;
-    loading: boolean;
-}
+    // Auto-refresh time range
+    const [, setTick] = useState(0)
+    useEffect(() => {
+        const interval = setInterval(() => setTick(t => t + 1), 30000)
+        return () => clearInterval(interval)
+    }, [])
 
-const MetricCard: React.FC<MetricCardProps> = ({ title, value, precision, suffix, color, loading }) => (
-    <Card bordered={false}>
-        <Skeleton loading={loading} active paragraph={{ rows: 1 }}>
-            <Statistic
-                title={title}
-                value={value}
-                precision={precision}
-                suffix={suffix}
-                valueStyle={{ color }}
-            />
-        </Skeleton>
-    </Card>
-);
-
-
-interface DashboardProps {
-    timeRange: [string, string] | null;
-}
-
-const Dashboard: React.FC<DashboardProps> = ({ timeRange }) => {
-    const { token } = theme.useToken();
-    const [selectedServices, setSelectedServices] = useState<string[]>(['order-service', 'payment-service']);
-
-    // Queries
-    const { data: stats, refetch: refetchStats, isLoading: isLoadingStats } = useQuery({
-        queryKey: ['dashboardStats', timeRange, selectedServices],
-        queryFn: () => fetchDashboardStats(timeRange?.[0], timeRange?.[1], selectedServices),
-        refetchInterval: 10000
-    });
-
-    const { data: traffic, refetch: refetchTraffic, isLoading: isLoadingTraffic } = useQuery({
-        queryKey: ['traffic', timeRange, selectedServices],
-        queryFn: () => fetchTraffic(timeRange?.[0], timeRange?.[1], selectedServices),
-        refetchInterval: 10000
-    });
-
-    const { data: heatmapData, refetch: refetchHeatmap, isLoading: isLoadingHeatmap } = useQuery({
-        queryKey: ['heatmap', timeRange, selectedServices],
-        queryFn: () => fetchHeatmap(timeRange?.[0], timeRange?.[1], selectedServices),
-        refetchInterval: 10000
-    });
-
-    const handleRefresh = () => {
-        refetchStats();
-        refetchTraffic();
-        refetchHeatmap();
-    };
-
-    // Chart Options
-    const trafficOptions: Highcharts.Options = useMemo(() => ({
-        chart: { type: 'areaspline', height: 300, backgroundColor: 'transparent' },
-        title: { text: undefined },
+    const trafficChartOption = useMemo(() => ({
+        tooltip: { trigger: 'axis' },
+        grid: { left: 50, right: 20, top: 20, bottom: 30 },
         xAxis: {
-            type: 'datetime',
-            title: { text: null }
+            type: 'time',
+            axisLabel: { formatter: (val: number) => new Date(val).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
         },
-        yAxis: { title: { text: 'Req/Sec' }, gridLineDashStyle: 'Dash' },
-        plotOptions: {
-            areaspline: {
-                fillColor: {
-                    linearGradient: { x1: 0, y1: 0, x2: 0, y2: 1 },
-                    stops: [
-                        [0, token.colorPrimary],
-                        [1, 'rgba(255,255,255,0)']
-                    ]
-                },
-                marker: { enabled: true, radius: 3 },
-                lineWidth: 2,
-                color: token.colorPrimary
-            }
-        },
-        series: [{
-            type: 'areaspline',
-            name: 'Traffic',
-            data: traffic?.map(p => [new Date(p.timestamp).getTime(), p.count]) || []
-        }],
-        credits: { enabled: false }
-    }), [traffic, token.colorPrimary]);
+        yAxis: { type: 'value', name: 'Requests' },
+        series: [
+            {
+                name: 'Total',
+                type: 'line',
+                smooth: true,
+                data: (traffic || []).map(p => [new Date(p.timestamp).getTime(), p.count]),
+                areaStyle: { opacity: 0.1, color: '#4c6ef5' },
+                lineStyle: { color: '#4c6ef5', width: 2 },
+                itemStyle: { color: '#4c6ef5' },
+            },
+            {
+                name: 'Errors',
+                type: 'line',
+                smooth: true,
+                data: (traffic || []).map(p => [new Date(p.timestamp).getTime(), p.error_count]),
+                areaStyle: { opacity: 0.1, color: '#fa5252' },
+                lineStyle: { color: '#fa5252', width: 2 },
+                itemStyle: { color: '#fa5252' },
+            },
+        ],
+    }), [traffic])
 
-    const heatmapOptions: Highcharts.Options = useMemo(() => ({
-        chart: { type: 'scatter', height: 300, backgroundColor: 'transparent' },
-        title: { text: undefined },
-        xAxis: { type: 'datetime' },
-        yAxis: { title: { text: 'Duration (µs)' }, min: 0 },
-        plotOptions: {
-            scatter: {
-                marker: {
-                    radius: 2,
-                    states: { hover: { enabled: true, lineColor: 'rgb(100,100,100)' } }
-                },
-                tooltip: {
-                    headerFormat: '<b>{series.name}</b><br>',
-                    pointFormat: '{point.x:%H:%M:%S}, {point.y} µs'
-                }
-            }
+    const failingChartOption = useMemo(() => ({
+        tooltip: { trigger: 'axis' },
+        grid: { left: 120, right: 30, top: 10, bottom: 10 },
+        xAxis: { type: 'value', name: 'Error Rate %' },
+        yAxis: {
+            type: 'category',
+            data: (topFailing || []).map(s => s.service_name),
         },
-        series: [{
-            type: 'scatter',
-            name: 'Trace Latency',
-            color: 'rgba(223, 83, 83, .5)',
-            data: heatmapData?.map(p => [new Date(p.timestamp).getTime(), p.duration]) || []
-        }],
-        credits: { enabled: false }
-    }), [heatmapData]);
-
-    const serviceHealthOptions: Highcharts.Options = useMemo(() => ({
-        chart: { type: 'bar', height: 300, backgroundColor: 'transparent' },
-        title: { text: undefined },
-        xAxis: {
-            categories: stats?.top_failing_services?.map(s => s.service_name) || [],
-            title: { text: null }
-        },
-        yAxis: { min: 0, title: { text: 'Error Count', align: 'high' } },
-        plotOptions: {
-            bar: {
-                dataLabels: { enabled: true },
-                color: token.colorError
-            }
-        },
-        legend: { enabled: false },
         series: [{
             type: 'bar',
-            name: 'Errors',
-            data: stats?.top_failing_services?.map(s => s.error_count) || []
+            data: (topFailing || []).map(s => ({
+                value: +(s.error_rate * 100).toFixed(1),
+                itemStyle: { color: s.error_rate > 0.1 ? '#fa5252' : s.error_rate > 0.05 ? '#fd7e14' : '#40c057' },
+            })),
+            barWidth: 16,
+            itemStyle: { borderRadius: [0, 4, 4, 0] },
         }],
-        credits: { enabled: false }
-    }), [stats?.top_failing_services, token.colorError]);
+    }), [topFailing])
+
+    const statCards = [
+        { label: 'Total Traces', value: stats?.total_traces ?? 0, icon: Layers, color: 'indigo' },
+        { label: 'Total Logs', value: stats?.total_logs ?? 0, icon: Activity, color: 'cyan' },
+        { label: 'Total Errors', value: stats?.total_errors ?? 0, icon: AlertTriangle, color: 'red' },
+        { label: 'Avg Latency', value: `${(stats?.avg_latency_ms ?? 0).toFixed(1)}ms`, icon: Clock, color: 'orange' },
+    ]
 
     return (
-        <div>
-            {/* Global Filter Bar */}
-            <Card style={{ marginBottom: 24 }} bodyStyle={{ padding: '16px 24px' }}>
-                <Row justify="space-between" align="middle">
-                    <Col>
-                        <Space size="large">
-                            <span style={{ fontWeight: 500, color: token.colorTextSecondary }}>FILTERS:</span>
-                            <Select
-                                mode="multiple"
-                                style={{ width: 300 }}
-                                placeholder="Filter by Service"
-                                defaultValue={['order-service', 'payment-service']}
-                                onChange={setSelectedServices}
-                                options={[
-                                    { value: 'order-service', label: 'Order Service' },
-                                    { value: 'payment-service', label: 'Payment Service' },
-                                ]}
-                            />
-                        </Space>
-                    </Col>
-                    <Col>
-                        <Button icon={<ReloadOutlined />} onClick={handleRefresh}>
-                            Refresh
-                        </Button>
-                    </Col>
-                </Row>
-            </Card>
-
-            {/* Metrics Cards */}
-            <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-                <Col xs={24} sm={6}>
-                    <MetricCard
-                        title="Total Traces"
-                        value={stats?.total_traces}
-                        color={token.colorPrimary}
-                        loading={isLoadingStats}
+        <Stack gap="md">
+            {/* Header */}
+            <Group justify="space-between">
+                <Title order={3}>Dashboard</Title>
+                <Group gap="sm">
+                    <Select
+                        size="xs"
+                        data={[{ value: '', label: 'All Services' }, ...(services || []).map(s => ({ value: s, label: s }))]}
+                        value={selectedService || ''}
+                        onChange={(v) => setSelectedService(v || null)}
+                        placeholder="Filter by service"
+                        clearable
+                        styles={{ input: { width: 180 } }}
                     />
-                </Col>
-                <Col xs={24} sm={6}>
-                    <MetricCard
-                        title="Error Rate"
-                        value={stats?.error_rate}
-                        precision={2}
-                        suffix="%"
-                        color={(stats?.error_rate || 0) > 1 ? token.colorError : token.colorSuccess}
-                        loading={isLoadingStats}
+                    <TimeRangeSelector
+                        value={tr.timeRange}
+                        onChange={tr.setTimeRange}
                     />
-                </Col>
-                <Col xs={24} sm={6}>
-                    <MetricCard
-                        title="P99 Latency"
-                        value={(stats?.p99_latency || 0) / 1000}
-                        precision={2}
-                        suffix="ms"
-                        loading={isLoadingStats}
-                    />
-                </Col>
-                <Col xs={24} sm={6}>
-                    <MetricCard
-                        title="Active Services"
-                        value={stats?.active_services}
-                        loading={isLoadingStats}
-                    />
-                </Col>
-            </Row>
+                </Group>
+            </Group>
 
-            {/* Charts Row 1 */}
-            <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-                <Col xs={24} lg={16}>
-                    <Card title="Traffic Volume (Req/Sec)" bordered={false} bodyStyle={{ minHeight: 350 }}>
-                        {isLoadingTraffic ? (
-                            <Skeleton active paragraph={{ rows: 6 }} />
-                        ) : (traffic?.length || 0) > 0 ? (
-                            <HighchartsReact highcharts={Highcharts} options={trafficOptions} />
-                        ) : (
-                            <Empty description="No Traffic Data" />
-                        )}
-                    </Card>
-                </Col>
-                <Col xs={24} lg={8}>
-                    <Card title="Top Failing Services" bordered={false} bodyStyle={{ minHeight: 350 }}>
-                        {isLoadingStats ? (
-                            <Skeleton active paragraph={{ rows: 6 }} />
-                        ) : (stats?.top_failing_services?.length || 0) > 0 ? (
-                            <HighchartsReact highcharts={Highcharts} options={serviceHealthOptions} />
-                        ) : (
-                            <Empty description="No Errors Found" />
-                        )}
-                    </Card>
-                </Col>
-            </Row>
+            {/* Stat Cards */}
+            <SimpleGrid cols={{ base: 2, md: 4 }}>
+                {statCards.map((s) => (
+                    <Paper key={s.label} shadow="xs" p="md" radius="md" withBorder>
+                        <Group justify="space-between" align="flex-start">
+                            <Box>
+                                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{s.label}</Text>
+                                <Title order={3} mt={4}>{typeof s.value === 'number' ? s.value.toLocaleString() : s.value}</Title>
+                            </Box>
+                            <ThemeIcon variant="light" color={s.color} size="lg" radius="md">
+                                <s.icon size={18} />
+                            </ThemeIcon>
+                        </Group>
+                    </Paper>
+                ))}
+            </SimpleGrid>
 
-            {/* Charts Row 2 */}
-            <Row gutter={[16, 16]}>
-                <Col span={24}>
-                    <Card title="Latency Distribution (Heatmap)" bordered={false} bodyStyle={{ minHeight: 350 }}>
-                        {isLoadingHeatmap ? (
-                            <Skeleton active paragraph={{ rows: 6 }} />
-                        ) : (heatmapData?.length || 0) > 0 ? (
-                            <HighchartsReact highcharts={Highcharts} options={heatmapOptions} />
-                        ) : (
-                            <Empty description="No Latency Data" />
-                        )}
-                    </Card>
-                </Col>
-            </Row>
-        </div >
-    );
-};
+            {/* Traffic Chart */}
+            <Paper shadow="xs" p="md" radius="md" withBorder>
+                <Text fw={600} mb="sm">Traffic Over Time</Text>
+                <Box style={{ height: 300 }}>
+                    <ReactEChartsCore echarts={echarts} option={trafficChartOption} style={{ height: '100%' }} />
+                </Box>
+            </Paper>
 
-export default Dashboard;
+            {/* Top Failing Services */}
+            <Paper shadow="xs" p="md" radius="md" withBorder>
+                <Group justify="space-between" mb="sm">
+                    <Text fw={600}>Top Failing Services</Text>
+                    <Badge variant="light" color="red" size="sm">{(topFailing || []).length} services</Badge>
+                </Group>
+                <Box style={{ height: 250 }}>
+                    {(topFailing || []).length > 0 ? (
+                        <ReactEChartsCore echarts={echarts} option={failingChartOption} style={{ height: '100%' }} />
+                    ) : (
+                        <Group justify="center" align="center" style={{ height: '100%' }}>
+                            <Text c="dimmed">No failing services detected</Text>
+                        </Group>
+                    )}
+                </Box>
+            </Paper>
+        </Stack>
+    )
+}

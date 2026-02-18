@@ -1,14 +1,63 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
-
-body {
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background-color: #f0f2f5;
+:root {
+  --argus-bg: #f8f9fa;
+  --argus-sidebar-bg: #1a1b1e;
+  --argus-sidebar-text: #c1c2c5;
+  --argus-sidebar-active: #4c6ef5;
+  --argus-card-bg: #ffffff;
+  --argus-border: #e9ecef;
+  --argus-accent: #4c6ef5;
+  --argus-severity-error: #fa5252;
+  --argus-severity-warn: #fd7e14;
+  --argus-severity-info: #228be6;
+  --argus-severity-debug: #868e96;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
 }
 
-/* Custom scrollbar for Webkit */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--argus-bg);
+  color: #212529;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Severity Badges */
+.severity-error {
+  color: var(--argus-severity-error);
+}
+
+.severity-warn {
+  color: var(--argus-severity-warn);
+}
+
+.severity-info {
+  color: var(--argus-severity-info);
+}
+
+.severity-debug {
+  color: var(--argus-severity-debug);
+}
+
+/* JSON Pretty Print */
+.json-view {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: #f1f3f5;
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Scrollbar Styling */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -19,10 +68,10 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #333;
+  background: #ced4da;
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: #adb5bd;
 }
