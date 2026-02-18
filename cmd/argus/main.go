@@ -32,6 +32,9 @@ import (
 )
 
 func main() {
+	// Force UTC timezone globally — prevents system timezone leaking into timestamps
+	time.Local = time.UTC
+
 	printBanner()
 
 	// 0. Load Configuration
