@@ -12,22 +12,71 @@ import {
     NumberInput,
     Box,
 } from '@mantine/core'
-import { useQuery } from '@tanstack/react-query'
 import { notifications } from '@mantine/notifications'
 import { Activity, Database, HardDrive, Users, Trash2, Sparkles } from 'lucide-react'
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import type { HealthStats } from '../../types'
 
 export function SettingsPage() {
     const [purgeDays, setPurgeDays] = useState<number>(7)
     const [purging, setPurging] = useState(false)
     const [vacuuming, setVacuuming] = useState(false)
+    const [health, setHealth] = useState<HealthStats | null>(null)
+    const [wsConnected, setWsConnected] = useState(false)
+    const wsRef = useRef<WebSocket | null>(null)
+    const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-    const { data: health } = useQuery<HealthStats>({
-        queryKey: ['health'],
-        queryFn: () => fetch('/api/health').then(r => r.json()),
-        refetchInterval: 5000,
-    })
+    const connectWs = useCallback(() => {
+        // Cleanup any existing connection
+        if (wsRef.current) {
+            wsRef.current.close()
+            wsRef.current = null
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+        const wsUrl = `${protocol}//${window.location.host}/ws/health`
+        const ws = new WebSocket(wsUrl)
+
+        ws.onopen = () => {
+            setWsConnected(true)
+        }
+
+        ws.onmessage = (event) => {
+            try {
+                const data: HealthStats = JSON.parse(event.data)
+                setHealth(data)
+            } catch {
+                // ignore malformed messages
+            }
+        }
+
+        ws.onclose = () => {
+            setWsConnected(false)
+            wsRef.current = null
+            // Auto-reconnect after 3 seconds
+            reconnectTimerRef.current = setTimeout(connectWs, 3000)
+        }
+
+        ws.onerror = () => {
+            ws.close()
+        }
+
+        wsRef.current = ws
+    }, [])
+
+    useEffect(() => {
+        connectWs()
+
+        return () => {
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current)
+            }
+            if (wsRef.current) {
+                wsRef.current.close()
+                wsRef.current = null
+            }
+        }
+    }, [connectWs])
 
     const handlePurge = async () => {
         setPurging(true)
@@ -102,7 +151,9 @@ export function SettingsPage() {
                 <Group gap="xs" mb="md">
                     <Sparkles size={20} color="#4c6ef5" />
                     <Title order={5}>Argus Health</Title>
-                    <Badge variant="dot" color="green" size="sm">Live</Badge>
+                    <Badge variant="dot" color={wsConnected ? 'green' : 'red'} size="sm">
+                        {wsConnected ? 'Live' : 'Reconnecting...'}
+                    </Badge>
                 </Group>
 
                 <SimpleGrid cols={{ base: 2, md: 4 }}>
