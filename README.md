@@ -1,8 +1,8 @@
 # Project Argus
 
-[![Latest Release](https://img.shields.io/github/v/release/RandomCodeSpace/Project-Argus)](https://github.com/RandomCodeSpace/Project-Argus/releases)
-[![Security Audit](https://github.com/RandomCodeSpace/Project-Argus/actions/workflows/audit.yml/badge.svg)](https://github.com/RandomCodeSpace/Project-Argus/actions)
-[![CodeQL](https://github.com/RandomCodeSpace/Project-Argus/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/RandomCodeSpace/Project-Argus/actions/workflows/github-code-scanning/codeql)
+[![Latest Release](https://img.shields.io/github/v/release/RandomCodeSpace/Project-Argus)](https://github.com/RandomCodeSpace/argus/releases)
+[![Security Audit](https://github.com/RandomCodeSpace/argus/actions/workflows/audit.yml/badge.svg)](https://github.com/RandomCodeSpace/argus/actions)
+[![CodeQL](https://github.com/RandomCodeSpace/argus/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/RandomCodeSpace/argus/actions/workflows/github-code-scanning/codeql)
 ![Go Version](https://img.shields.io/github/go-mod/go-version/RandomCodeSpace/Project-Argus)
 ![React](https://img.shields.io/badge/frontend-React%20v18-61dafb?logo=react)
 
@@ -12,7 +12,7 @@ Project Argus is an integrated observability and AI analysis platform.
 
 ### Installation
 ```bash
-go install github.com/RandomCodeSpace/Project-Argus/cmd/argus@latest
+go install github.com/RandomCodeSpace/argus/cmd/argus@latest
 ```
 
 ### Running

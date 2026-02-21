@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/RandomCodeSpace/Project-Argus/internal/storage"
+	"github.com/RandomCodeSpace/argus/internal/storage"
 )
 
 // handleGetTrafficMetrics handles GET /api/metrics/traffic

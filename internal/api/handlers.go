@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/RandomCodeSpace/Project-Argus/internal/realtime"
-	"github.com/RandomCodeSpace/Project-Argus/internal/storage"
-	"github.com/RandomCodeSpace/Project-Argus/internal/telemetry"
+	"github.com/RandomCodeSpace/argus/internal/realtime"
+	"github.com/RandomCodeSpace/argus/internal/storage"
+	"github.com/RandomCodeSpace/argus/internal/telemetry"
 )
 
 // Server handles HTTP API requests.

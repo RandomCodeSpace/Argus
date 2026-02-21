@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RandomCodeSpace/Project-Argus/internal/telemetry"
+	"github.com/RandomCodeSpace/argus/internal/telemetry"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/RandomCodeSpace/Project-Argus/internal/storage"
+	"github.com/RandomCodeSpace/argus/internal/storage"
 	"github.com/coder/websocket"
 )
 

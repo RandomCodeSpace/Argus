@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RandomCodeSpace/Project-Argus/internal/config"
-	"github.com/RandomCodeSpace/Project-Argus/internal/storage"
-	"github.com/RandomCodeSpace/Project-Argus/internal/telemetry"
+	"github.com/RandomCodeSpace/argus/internal/config"
+	"github.com/RandomCodeSpace/argus/internal/storage"
+	"github.com/RandomCodeSpace/argus/internal/telemetry"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
