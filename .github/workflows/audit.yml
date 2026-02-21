@@ -61,4 +61,4 @@ jobs:
         run: go vet ./...
 
       - name: Build Backend
-        run: go build -o argus ./cmd/argus
+        run: go build -o argus .

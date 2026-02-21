@@ -2,7 +2,7 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-cmd = "go build -o ./tmp/argus.exe ./cmd/argus"
+cmd = "go build -o ./tmp/argus.exe ."
 bin = "./tmp/argus.exe"
 include_ext = ["go", "tpl", "tmpl", "html"]
 exclude_dir = ["assets", "tmp", "vendor", "testdata", "web", "test"]
