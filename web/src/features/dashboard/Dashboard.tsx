@@ -145,7 +145,7 @@ export function Dashboard() {
                     )}
                 </Group>
                 <Group gap="md">
-                    <GlobalControls />
+                    
                     <Select
                         size="xs"
                         data={[{ value: '', label: 'All Services' }, ...(services || []).map(s => ({ value: s, label: s }))]}
@@ -155,6 +155,7 @@ export function Dashboard() {
                         clearable
                         styles={{ input: { width: 180 } }}
                     />
+                    <GlobalControls />
                 </Group>
             </Group>
 

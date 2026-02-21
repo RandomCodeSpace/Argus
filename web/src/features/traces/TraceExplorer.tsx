@@ -26,7 +26,6 @@ import { Search, Clock, ChevronRight, ChevronDown } from 'lucide-react'
 import type { TraceResponse, Trace, Span } from '../../types'
 import { useTimeRange } from '../../components/TimeRangeSelector'
 import { useFilterParam, useFilterParamString } from '../../hooks/useFilterParams'
-import { useLiveMode } from '../../contexts/LiveModeContext'
 import { GlobalControls } from '../../components/GlobalControls'
 
 const STATUS_COLORS: Record<string, string> = {
@@ -49,7 +48,6 @@ export function TraceExplorer() {
     const [expandedTraces, setExpandedTraces] = useState<Set<number>>(new Set())
 
     const tr = useTimeRange('5m')
-    const { isLive, setServiceFilter } = useLiveMode()
 
     // Calculate dynamic page size based on available height (Stabilized)
     useEffect(() => {
@@ -68,19 +66,13 @@ export function TraceExplorer() {
         }
     }, [containerHeight, pageSize])
 
-    // Sync local filter param to global live mode filter
-    useEffect(() => {
-        if (isLive) {
-            setServiceFilter(selectedService || '')
-        }
-    }, [isLive, selectedService, setServiceFilter])
 
     const { data: services } = useQuery<string[]>({
         queryKey: ['services'],
         queryFn: () => fetch('/api/metadata/services').then(r => r.json()),
     })
 
-    const tracesQueryKey = isLive ? ['live', 'traces'] : ['traces', page, search, selectedService, tr.start, tr.end, debouncedPageSize]
+    const tracesQueryKey = ['traces', page, search, selectedService, tr.start, tr.end, debouncedPageSize]
 
     // Traces data
     const { data, isLoading, isFetching } = useQuery<TraceResponse>({
@@ -95,7 +87,6 @@ export function TraceExplorer() {
             params.append('end', tr.end)
             return fetch(`/api/traces?${params}`).then(r => r.json())
         },
-        enabled: !isLive,
         staleTime: 30000, // Keep data fresh for 30s
         refetchOnWindowFocus: false, // Core requirement: No background noise
     })
@@ -211,9 +202,7 @@ export function TraceExplorer() {
             <Group justify="space-between">
                 <Group gap="sm">
                     <Title order={3}>Traces</Title>
-                    {!isLive && (
-                        <Badge variant="light" color="indigo">{data?.total ?? 0} total</Badge>
-                    )}
+                    <Badge variant="light" color="indigo">{data?.total ?? 0} total</Badge>
                 </Group>
                 <GlobalControls />
             </Group>
@@ -241,7 +230,7 @@ export function TraceExplorer() {
             </Paper>
 
             <Paper shadow="xs" radius="md" withBorder style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-                <LoadingOverlay visible={isFetching && !isLive} zIndex={1000} overlayProps={{ radius: 'sm', blur: 2 }} />
+                <LoadingOverlay visible={isFetching} zIndex={1000} overlayProps={{ radius: 'sm', blur: 2 }} />
 
                 <Box ref={containerRef} style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
                     <Table striped highlightOnHover>
@@ -262,7 +251,7 @@ export function TraceExplorer() {
                             ))}
                         </Table.Thead>
                         <Table.Tbody>
-                            {isLoading && !isLive ? (
+                            {isLoading ? (
                                 <Table.Tr>
                                     <Table.Td colSpan={columns.length}>
                                         <Text c="dimmed" ta="center" py="md">Loading traces...</Text>
@@ -271,7 +260,7 @@ export function TraceExplorer() {
                             ) : traces.length === 0 ? (
                                 <Table.Tr>
                                     <Table.Td colSpan={columns.length}>
-                                        <Text c="dimmed" ta="center" py="md">{isLive ? 'Waiting for live data...' : 'No traces found'}</Text>
+                                        <Text c="dimmed" ta="center" py="md">No traces found</Text>
                                     </Table.Td>
                                 </Table.Tr>
                             ) : table.getRowModel().rows.map(row => (
@@ -327,9 +316,9 @@ export function TraceExplorer() {
                     </Table>
                 </Box>
 
-                {/* Footer - Fixed height to keep layout stable during mode toggles */}
+                {/* Footer - Fixed height to keep layout stable */}
                 <Box p="xs" style={{ borderTop: '1px solid var(--mantine-color-gray-2)', height: 48, display: 'flex', alignItems: 'center' }}>
-                    {!isLive && totalPages > 1 && (
+                    {totalPages > 1 && (
                         <Group justify="center" style={{ flex: 1 }}>
                             <Pagination total={totalPages} value={page} onChange={setPage} size="sm" />
                         </Group>

@@ -2,36 +2,47 @@ import { Group, Switch, Text, Badge, ActionIcon, Tooltip } from '@mantine/core'
 import { Play, Pause, RefreshCw } from 'lucide-react'
 import { useLiveMode } from '../contexts/LiveModeContext'
 import { TimeRangeSelector, useTimeRange } from './TimeRangeSelector'
+import { useFilterParamString } from '../hooks/useFilterParams'
 
 export function GlobalControls() {
-    const { isLive, isConnected, setIsLive } = useLiveMode()
+    const { isLive, setIsLive } = useLiveMode()
     const tr = useTimeRange('5m')
+    const [page] = useFilterParamString('page', 'dashboard')
+    const isLiveSupported = page === 'dashboard' || page === 'map'
+    const showHistoricalControls = !isLive || !isLiveSupported
+
+    const formatDateTime = (startIso: string, endIso: string) => {
+        const s = new Date(startIso)
+        const e = new Date(endIso)
+
+        const formatDate = (d: Date) => {
+            const day = d.getDate().toString().padStart(2, '0')
+            const month = d.toLocaleString('en-US', { month: 'short' })
+            const year = d.getFullYear()
+            return `${day}-${month}-${year}`
+        }
+
+        const formatTime = (d: Date) => {
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+        }
+
+        const sDate = formatDate(s)
+        const eDate = formatDate(e)
+
+        if (sDate === eDate) {
+            return `${sDate} ${formatTime(s)} - ${formatTime(e)}`
+        }
+        return `${sDate} ${formatTime(s)} - ${eDate} ${formatTime(e)}`
+    }
 
     return (
         <Group gap="md">
-            <Switch
-                label={
-                    <Group gap={6}>
-                        <Text size="sm" fw={500}>Live Mode</Text>
-                        {isLive && (
-                            <Badge
-                                variant="dot"
-                                color={isConnected ? 'green' : 'red'}
-                                size="xs"
-                            >
-                                {isConnected ? 'ON' : '...'}
-                            </Badge>
-                        )}
-                    </Group>
-                }
-                checked={isLive}
-                onChange={(e) => setIsLive(e.currentTarget.checked)}
-                onLabel={<Play size={12} />}
-                offLabel={<Pause size={12} />}
-                size="md"
-            />
-            {!isLive && (
+            
+            {showHistoricalControls && (
                 <Group gap="xs">
+                    <Badge variant="light" color="gray" size="sm" style={{ fontFamily: 'var(--font-mono)', textTransform: 'none' }}>
+                        {formatDateTime(tr.start, tr.end)}
+                    </Badge>
                     <TimeRangeSelector
                         value={tr.timeRange}
                         onChange={tr.setTimeRange}
@@ -47,6 +58,20 @@ export function GlobalControls() {
                         </ActionIcon>
                     </Tooltip>
                 </Group>
+            )}
+            {isLiveSupported && (
+                <Switch
+                    label={
+                        <Group gap={6}>
+                            <Text size="sm" fw={500}>Live Mode</Text>
+                        </Group>
+                    }
+                    checked={isLive}
+                    onChange={(e) => setIsLive(e.currentTarget.checked)}
+                    onLabel={<Play size={12} />}
+                    offLabel={<Pause size={12} />}
+                    size="md"
+                />
             )}
         </Group>
     )

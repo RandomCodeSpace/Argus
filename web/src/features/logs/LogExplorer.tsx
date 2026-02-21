@@ -30,7 +30,6 @@ import { Search, Sparkles, ChevronRight, ChevronDown, List } from 'lucide-react'
 import type { LogEntry, LogResponse } from '../../types'
 import { useTimeRange, TIME_RANGES } from '../../components/TimeRangeSelector'
 import { useFilterParam, useFilterParamString } from '../../hooks/useFilterParams'
-import { useLiveMode } from '../../contexts/LiveModeContext'
 import { GlobalControls } from '../../components/GlobalControls'
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -65,13 +64,6 @@ export function LogExplorer() {
     const [selectedService, setSelectedService] = useFilterParam('service', null)
     const [selectedSeverity, setSelectedSeverity] = useFilterParam('severity', null)
     const [searchText, setSearchText] = useFilterParamString('log_q', '')
-    const { isLive: liveMode } = useLiveMode()
-
-    // 2. WebSocket Throttling (Optimized)
-    const [liveLogs, setLiveLogs] = useState<LogEntry[]>([])
-    const liveLogBuffer = useRef<LogEntry[]>([])
-    const wsRef = useRef<WebSocket | null>(null)
-
     // Expanded state
     const [expandedLogs, setExpandedLogs] = useState<Set<number>>(new Set())
     const [contextMap, setContextMap] = useState<Map<number, LogEntry[]>>(new Map())
@@ -79,10 +71,7 @@ export function LogExplorer() {
 
     const tr = useTimeRange('5m')
 
-    // Reset page when switching modes
-    useEffect(() => {
-        setPage(1)
-    }, [liveMode])
+    // Reset page when switching modes - Removed
 
     // Stabilized dynamic page size calculation
     useEffect(() => {
@@ -124,79 +113,19 @@ export function LogExplorer() {
             const res = await fetch(`/api/logs?${params}`)
             return res.json()
         },
-        enabled: !liveMode,
+        enabled: true, // Always enabled as liveMode is removed
         staleTime: 30000,
         refetchOnWindowFocus: false,
     })
 
-    // 4. WebSocket Manager (Throttled Updates)
-    useEffect(() => {
-        if (!liveMode) {
-            if (wsRef.current) {
-                wsRef.current.close()
-                wsRef.current = null
-            }
-            setLiveLogs([])
-            liveLogBuffer.current = []
-            return
-        }
-
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const ws = new WebSocket(`${protocol}//${window.location.host}/ws`)
-        wsRef.current = ws
-
-        ws.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data)
-                // DEFENSIVE: Batch logs into buffer instead of immediate state update
-                if (Array.isArray(data)) {
-                    liveLogBuffer.current = [...data, ...liveLogBuffer.current].slice(0, 50)
-                }
-            } catch (err) {
-                console.warn('WS Refreshing: Non-iterable data or heartbeat received')
-            }
-        }
-
-        // Flush buffer to UI every 500ms to keep it smooth under high load
-        const flushInterval = setInterval(() => {
-            if (liveLogBuffer.current.length > 0) {
-                setLiveLogs([...liveLogBuffer.current])
-            }
-        }, 500)
-
-        ws.onerror = () => ws.close()
-        ws.onclose = () => { wsRef.current = null }
-
-        return () => {
-            clearInterval(flushInterval)
-            ws.close()
-            wsRef.current = null
-        }
-    }, [liveMode])
 
     // 5. Intelligent Filtering Logic (Optimized)
     // Only filter on client side for LIVE logs. Historical logs are already server-side filtered.
     const displayLogs = useMemo(() => {
-        const rawLogs = liveMode ? liveLogs : (historicalData?.logs || historicalData?.data || [])
+        return (historicalData?.logs || historicalData?.data || [])
+    }, [historicalData])
 
-        // If not in live mode, trust the server's filtering
-        if (!liveMode) return rawLogs
-
-        // If in live mode, filter the live buffer on client side
-        if (!searchText && !selectedService && !selectedSeverity) return rawLogs
-
-        const searchLower = searchText.toLowerCase()
-        return rawLogs.filter((log: LogEntry) => {
-            if (selectedService && log.service_name !== selectedService) return false
-            if (selectedSeverity && log.severity !== selectedSeverity) return false
-            if (searchText) {
-                return log.body.toLowerCase().includes(searchLower) || (log.trace_id && log.trace_id.toLowerCase().includes(searchLower))
-            }
-            return true
-        })
-    }, [liveMode, liveLogs, historicalData, selectedService, selectedSeverity, searchText])
-
-    const totalCount = liveMode ? displayLogs.length : (historicalData?.total || 0)
+    const totalCount = (historicalData?.total || 0) // Simplified
     const totalPages = Math.ceil(totalCount / Math.max(1, debouncedPageSize))
 
     const toggleExpand = useCallback((id: number) => {
@@ -264,15 +193,11 @@ export function LogExplorer() {
         }),
     ], [expandedLogs])
 
-    // 6. Logic for Live Mode (Full Scroll, No Pagination)
+    // 6. Pagination Logic
     const paginatedLogs = useMemo(() => {
-        if (!liveMode) {
-            const start = (page - 1) * debouncedPageSize
-            return displayLogs.slice(start, start + debouncedPageSize)
-        }
-        // In Live Mode, show full buffer (max 50) for "full scroll" feel
-        return displayLogs
-    }, [liveMode, displayLogs, page, debouncedPageSize])
+        const start = (page - 1) * debouncedPageSize
+        return displayLogs.slice(start, start + debouncedPageSize)
+    }, [displayLogs, page, debouncedPageSize])
 
     const table = useReactTable({
         data: paginatedLogs,
@@ -313,11 +238,10 @@ export function LogExplorer() {
             <Group justify="space-between" px="xs">
                 <Group gap="sm">
                     <Title order={3}>Logs</Title>
-                    {!liveMode && (
-                        <Badge variant="light" color="indigo" size="lg">
-                            {TIME_RANGES.find(r => r.value === tr.timeRange)?.label || tr.timeRange} • {totalCount} total
-                        </Badge>
-                    )}
+                    {/* Removed !liveMode condition */}
+                    <Badge variant="light" color="indigo" size="lg">
+                        {TIME_RANGES.find(r => r.value === tr.timeRange)?.label || tr.timeRange} • {totalCount} total
+                    </Badge>
                 </Group>
                 <GlobalControls />
             </Group>
@@ -360,9 +284,8 @@ export function LogExplorer() {
                 </Group>
             </Paper>
 
-            {/* Data Layer / Log Table */}
             <Paper shadow="xs" radius="md" withBorder mx="xs" style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-                <LoadingOverlay visible={isFetchingLogs && !liveMode} zIndex={100} overlayProps={{ radius: 'sm', blur: 1 }} />
+                <LoadingOverlay visible={isFetchingLogs} zIndex={100} overlayProps={{ radius: 'sm', blur: 1 }} />
 
                 {/* Fixed Header */}
                 <Box bg="var(--mantine-color-gray-0)" style={{ borderBottom: '1px solid var(--mantine-color-gray-2)' }}>
@@ -540,16 +463,9 @@ export function LogExplorer() {
                 {/* Unified Footer - Locked height for stability */}
                 <Box p="xs" bg="var(--mantine-color-gray-0)" style={{ borderTop: '1px solid var(--mantine-color-gray-2)', height: 48, display: 'flex', alignItems: 'center' }}>
                     <Group justify="space-between" px="md" style={{ flex: 1 }}>
-                        <Box style={{ flex: 1 }}>
-                            {liveMode && (
-                                <Group gap="xs">
-                                    <Text size="xs" fw={500} c="dimmed">Live Buffer: {liveLogs.length}/50 logs</Text>
-                                    <Badge variant="dot" color="green" size="sm">RECEIVING DATA</Badge>
-                                </Group>
-                            )}
-                        </Box>
+                        <Box style={{ flex: 1 }} />
 
-                        {!liveMode && totalPages > 1 && (
+                        {totalPages > 1 && (
                             <Group justify="center" style={{ flex: 2 }}>
                                 <Pagination total={totalPages} value={page} onChange={setPage} size="sm" />
                             </Group>
