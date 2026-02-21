@@ -11,9 +11,12 @@ import (
 	"github.com/RandomCodeSpace/argus/internal/config"
 	"github.com/RandomCodeSpace/argus/internal/storage"
 	"github.com/RandomCodeSpace/argus/internal/telemetry"
+	"github.com/RandomCodeSpace/argus/internal/tsdb"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
@@ -35,6 +38,16 @@ type LogsServer struct {
 	allowedServices  map[string]bool
 	excludedServices map[string]bool
 	collogspb.UnimplementedLogsServiceServer
+}
+
+type MetricsServer struct {
+	repo             *storage.Repository
+	metrics          *telemetry.Metrics
+	aggregator       *tsdb.Aggregator
+	metricCallback   func(tsdb.RawMetric)
+	allowedServices  map[string]bool
+	excludedServices map[string]bool
+	colmetricspb.UnimplementedMetricsServiceServer
 }
 
 func NewTraceServer(repo *storage.Repository, metrics *telemetry.Metrics, cfg *config.Config) *TraceServer {
@@ -65,6 +78,88 @@ func NewLogsServer(repo *storage.Repository, metrics *telemetry.Metrics, cfg *co
 // SetLogCallback sets the function to call when a new log is received.
 func (s *LogsServer) SetLogCallback(cb func(storage.Log)) {
 	s.logCallback = cb
+}
+
+func NewMetricsServer(repo *storage.Repository, metrics *telemetry.Metrics, aggregator *tsdb.Aggregator, cfg *config.Config) *MetricsServer {
+	return &MetricsServer{
+		repo:             repo,
+		metrics:          metrics,
+		aggregator:       aggregator,
+		allowedServices:  parseServiceList(cfg.IngestAllowedServices),
+		excludedServices: parseServiceList(cfg.IngestExcludedServices),
+	}
+}
+
+// SetMetricCallback sets the function to call when a new metric point is received.
+func (s *MetricsServer) SetMetricCallback(cb func(tsdb.RawMetric)) {
+	s.metricCallback = cb
+}
+
+// Export handles incoming OTLP metrics data.
+func (s *MetricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
+	for _, resourceMetrics := range req.ResourceMetrics {
+		serviceName := getServiceName(resourceMetrics.Resource.Attributes)
+
+		if !shouldIngestService(serviceName, s.allowedServices, s.excludedServices) {
+			continue
+		}
+
+		for _, scopeMetrics := range resourceMetrics.ScopeMetrics {
+			for _, m := range scopeMetrics.Metrics {
+				var points []*metricspb.NumberDataPoint
+
+				// Extract points based on metric type
+				switch m.Data.(type) {
+				case *metricspb.Metric_Gauge:
+					points = m.GetGauge().DataPoints
+				case *metricspb.Metric_Sum:
+					points = m.GetSum().DataPoints
+				}
+
+				for _, p := range points {
+					var val float64
+					if p.Value != nil {
+						switch v := p.Value.(type) {
+						case *metricspb.NumberDataPoint_AsDouble:
+							val = v.AsDouble
+						case *metricspb.NumberDataPoint_AsInt:
+							val = float64(v.AsInt)
+						}
+					}
+
+					raw := tsdb.RawMetric{
+						Name:        m.Name,
+						ServiceName: serviceName,
+						Value:       val,
+						Timestamp:   time.Unix(0, int64(p.TimeUnixNano)),
+						Attributes:  make(map[string]interface{}),
+					}
+
+					// Convert attributes to map for TSDB grouping
+					for _, kv := range p.Attributes {
+						raw.Attributes[kv.Key] = kv.Value.String()
+					}
+
+					// 1. Process via TSDB Aggregator (for storage)
+					if s.aggregator != nil {
+						s.aggregator.Ingest(raw)
+					}
+
+					// 2. Real-time bypass (for live charts)
+					if s.metricCallback != nil {
+						s.metricCallback(raw)
+					}
+				}
+			}
+		}
+	}
+
+	if s.metrics != nil {
+		// Just a marker for Prometheus that metrics were received
+		s.metrics.RecordIngestion(1)
+	}
+
+	return &colmetricspb.ExportMetricsServiceResponse{}, nil
 }
 
 // Export handles incoming OTLP trace data.
@@ -112,7 +207,7 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 					EndTime:        endTime,
 					Duration:       duration,
 					ServiceName:    serviceName,
-					AttributesJSON: string(attrs),
+					AttributesJSON: storage.CompressedText(attrs),
 				}
 				spansToInsert = append(spansToInsert, sModel)
 

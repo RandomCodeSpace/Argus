@@ -11,8 +11,8 @@ export function GlobalControls() {
     const [page] = useFilterParamString('page', 'dashboard')
     const [selectedService, setSelectedService] = useFilterParam('service', null)
 
-    const isLiveSupported = page === 'dashboard' || page === 'map'
-    const isServiceFilterSupported = page === 'dashboard' || page === 'logs' || page === 'traces'
+    const isLiveSupported = page === 'dashboard' || page === 'map' || page === 'metrics'
+    const isServiceFilterSupported = page === 'dashboard' || page === 'logs' || page === 'traces' || page === 'metrics'
     const showHistoricalControls = !isLive || !isLiveSupported
 
     const { data: services } = useQuery<string[]>({

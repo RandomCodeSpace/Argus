@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useRef, useCallback, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useFilterParamString } from '../hooks/useFilterParams'
-import type { DashboardStats, TrafficPoint, TraceResponse, ServiceMapMetrics } from '../types'
+import type { DashboardStats, TrafficPoint, TraceResponse, ServiceMapMetrics, HubBatch, LogEntry, MetricEntry } from '../types'
 
 interface LiveSnapshot {
     type: 'live_snapshot'
@@ -93,6 +93,20 @@ export function LiveModeProvider({ children }: { children: ReactNode }) {
         }
     }, [queryClient])
 
+    const handleBatch = useCallback((batch: HubBatch) => {
+        if (batch.type === 'logs') {
+            // Buffer real-time logs (future explorer optimization)
+            queryClient.setQueryData(['live', 'logs'], (old: LogEntry[] | undefined) => {
+                return [...(batch.data as LogEntry[]), ...(old || [])].slice(0, 500)
+            })
+        } else if (batch.type === 'metrics') {
+            // Buffer real-time metrics for charts
+            queryClient.setQueryData(['live', 'realtime_metrics'], (old: MetricEntry[] | undefined) => {
+                return [...(old || []), ...(batch.data as MetricEntry[])].slice(-2000)
+            })
+        }
+    }, [queryClient])
+
     const cleanup = useCallback(() => {
         if (reconnectTimerRef.current) {
             clearTimeout(reconnectTimerRef.current)
@@ -127,9 +141,11 @@ export function LiveModeProvider({ children }: { children: ReactNode }) {
 
         ws.onmessage = (event) => {
             try {
-                const snapshot: LiveSnapshot = JSON.parse(event.data)
-                if (snapshot.type === 'live_snapshot') {
-                    handleSnapshot(snapshot)
+                const msg = JSON.parse(event.data)
+                if (msg.type === 'live_snapshot') {
+                    handleSnapshot(msg as LiveSnapshot)
+                } else if (msg.type === 'logs' || msg.type === 'metrics') {
+                    handleBatch(msg as HubBatch)
                 }
             } catch {
                 // Ignore malformed messages

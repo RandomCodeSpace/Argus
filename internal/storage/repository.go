@@ -101,6 +101,34 @@ func (r *Repository) BatchCreateLogs(logs []Log) error {
 	return nil
 }
 
+// BatchCreateMetrics inserts aggregated metrics in batches.
+func (r *Repository) BatchCreateMetrics(buckets []MetricBucket) error {
+	if len(buckets) == 0 {
+		return nil
+	}
+	result := r.db.CreateInBatches(buckets, 500)
+	if result.Error != nil {
+		return fmt.Errorf("failed to batch create metrics: %w", result.Error)
+	}
+	return nil
+}
+
+// GetMetricBuckets returns aggregated metrics for a specific time range and service.
+func (r *Repository) GetMetricBuckets(start, end time.Time, serviceName string, metricName string) ([]MetricBucket, error) {
+	var buckets []MetricBucket
+	query := r.db.Where("time_bucket BETWEEN ? AND ?", start, end)
+	if serviceName != "" {
+		query = query.Where("service_name = ?", serviceName)
+	}
+	if metricName != "" {
+		query = query.Where("name = ?", metricName)
+	}
+	if err := query.Order("time_bucket ASC").Find(&buckets).Error; err != nil {
+		return nil, fmt.Errorf("failed to get metric buckets: %w", err)
+	}
+	return buckets, nil
+}
+
 // CreateTrace inserts a new trace, skipping if it already exists.
 func (r *Repository) CreateTrace(trace Trace) error {
 	var tx *gorm.DB

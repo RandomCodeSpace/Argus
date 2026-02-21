@@ -21,15 +21,17 @@ import { LogExplorer } from '../features/logs/LogExplorer'
 import { ServiceMap } from '../features/topology/ServiceMap'
 import { SettingsPage } from '../features/settings/Settings'
 import { TraceExplorer } from '../features/traces/TraceExplorer'
+import { MetricsExplorer } from '../features/metrics/MetricsExplorer'
 
 
-type PageKey = 'dashboard' | 'map' | 'logs' | 'traces' | 'settings'
+type PageKey = 'dashboard' | 'map' | 'logs' | 'traces' | 'metrics' | 'settings'
 
 const navItems: { key: PageKey; label: string; icon: typeof LayoutDashboard }[] = [
     { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { key: 'map', label: 'Service Map', icon: Network },
     { key: 'logs', label: 'Logs', icon: ScrollText },
     { key: 'traces', label: 'Traces', icon: Activity },
+    { key: 'metrics', label: 'Metrics', icon: Activity },
     { key: 'settings', label: 'Settings', icon: Settings },
 ]
 
@@ -42,6 +44,7 @@ export function AppLayout() {
             case 'map': return <ServiceMap />
             case 'logs': return <LogExplorer />
             case 'traces': return <TraceExplorer />
+            case 'metrics': return <MetricsExplorer />
             case 'settings': return <SettingsPage />
         }
     }

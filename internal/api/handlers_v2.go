@@ -196,3 +196,30 @@ func (s *Server) handleGetServiceMapMetrics(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(metrics)
 }
+
+// handleGetMetricBuckets handles GET /api/metrics
+func (s *Server) handleGetMetricBuckets(w http.ResponseWriter, r *http.Request) {
+	start, end, err := parseTimeRange(r)
+	if err != nil {
+		http.Error(w, "invalid time range", http.StatusBadRequest)
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+	serviceName := r.URL.Query().Get("service_name")
+
+	// name is required for bucket queries
+	if name == "" {
+		http.Error(w, "metric name is required", http.StatusBadRequest)
+		return
+	}
+
+	buckets, err := s.repo.GetMetricBuckets(start, end, serviceName, name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(buckets)
+}

@@ -97,7 +97,7 @@ func AutoMigrateModels(db *gorm.DB, driver string) error {
 		log.Println("🔓 Disabled foreign key checks for migration")
 	}
 
-	if err := db.AutoMigrate(&Trace{}, &Span{}, &Log{}); err != nil {
+	if err := db.AutoMigrate(&Trace{}, &Span{}, &Log{}, &MetricBucket{}); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 

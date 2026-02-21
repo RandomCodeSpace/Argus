@@ -107,3 +107,29 @@ export interface HealthStats {
     active_connections: number
     db_latency_p99_ms: number
 }
+
+// Argus V5.3 Metrics Types
+export interface MetricBucket {
+    id: number
+    name: string
+    service_name: string
+    time_bucket: string
+    min: number
+    max: number
+    sum: number
+    count: number
+    attributes_json: string
+}
+
+export interface MetricEntry {
+    name: string
+    service_name: string
+    value: number
+    timestamp: string
+    attributes: Record<string, any>
+}
+
+export interface HubBatch {
+    type: 'logs' | 'metrics'
+    data: LogEntry[] | MetricEntry[]
+}

@@ -12,18 +12,24 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
-var tracer trace.Tracer
+var (
+	tracer       trace.Tracer
+	orderCounter metric.Int64Counter
+)
 
-func initTracer() func(context.Context) error {
+func initOTel() func(context.Context) error {
 	ctx := context.Background()
 
 	res, err := resource.New(ctx,
@@ -35,30 +41,51 @@ func initTracer() func(context.Context) error {
 		log.Fatalf("failed to create resource: %v", err)
 	}
 
+	// 1. Tracing Setup
 	traceClient := otlptracegrpc.NewClient(
 		otlptracegrpc.WithInsecure(),
 		otlptracegrpc.WithEndpoint("localhost:4317"),
 	)
-
-	exporter, err := otlptrace.New(ctx, traceClient)
+	traceExporter, err := otlptrace.New(ctx, traceClient)
 	if err != nil {
 		log.Fatalf("failed to create trace exporter: %v", err)
 	}
 
-	bsp := sdktrace.NewBatchSpanProcessor(exporter)
-	tracerProvider := sdktrace.NewTracerProvider(
+	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(bsp),
+		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(traceExporter)),
 	)
-	otel.SetTracerProvider(tracerProvider)
+	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
-	return tracerProvider.Shutdown
+	// 2. Metrics Setup
+	metricExporter, err := otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithInsecure(),
+		otlpmetricgrpc.WithEndpoint("localhost:4317"),
+	)
+	if err != nil {
+		log.Fatalf("failed to create metric exporter: %v", err)
+	}
+
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(5*time.Second))),
+	)
+	otel.SetMeterProvider(mp)
+
+	meter := otel.Meter("order-service")
+	orderCounter, _ = meter.Int64Counter("orders_processed_total", metric.WithDescription("Total number of orders processed"))
+
+	return func(ctx context.Context) error {
+		_ = tp.Shutdown(ctx)
+		_ = mp.Shutdown(ctx)
+		return nil
+	}
 }
 
 func main() {
-	shutdown := initTracer()
+	shutdown := initOTel()
 	defer shutdown(context.Background())
 
 	tracer = otel.Tracer("order-service")
@@ -123,6 +150,9 @@ func handleOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	span.AddEvent("order_completed", trace.WithAttributes(attribute.String("status", "success")))
+	if orderCounter != nil {
+		orderCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("service", "order-service")))
+	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Order Placed Successfully"))
 }

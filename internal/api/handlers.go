@@ -34,6 +34,7 @@ func NewServer(repo *storage.Repository, hub *realtime.Hub, eventHub *realtime.E
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stats", s.handleGetStats)
 	mux.HandleFunc("GET /api/traces", s.handleGetTraces)
+	mux.HandleFunc("GET /api/metrics", s.handleGetMetricBuckets)
 	mux.HandleFunc("GET /api/metrics/traffic", s.handleGetTrafficMetrics)
 	mux.HandleFunc("GET /api/metrics/latency_heatmap", s.handleGetLatencyHeatmap)
 	mux.HandleFunc("GET /api/metrics/dashboard", s.handleGetDashboardStats)

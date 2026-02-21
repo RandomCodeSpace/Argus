@@ -88,24 +88,25 @@ Write-Host "[3/4] Running load test..." -ForegroundColor Yellow
 Write-Host ""
 
 $startTime = Get-Date
+$total = 0
+$success = 0
+$failure = 0
 
 try {
     if ($Parallel -gt 1) {
         # Parallel execution
         Write-Host "  Starting parallel execution with $Parallel threads..." -ForegroundColor Cyan
         
-        $total = 0
-        $success = 0
-        $failure = 0
-
         while ($true) {
-            $results = 1..$Parallel | ForEach-Object -Parallel {
+            $batchSize = [math]::Min($Parallel, $RequestCount - $total)
+            $results = 1..$batchSize | ForEach-Object -Parallel {
                 $url = $using:TargetUrl
                 try {
                     $response = Invoke-WebRequest -Uri $url -Method POST -TimeoutSec 10 -ErrorAction Stop
                     if ($response.StatusCode -eq 200) { return "OK" } else { return "FAIL" }
                 }
                 catch {
+                    # Write-Host "Error: $_" -ForegroundColor Red
                     return "FAIL"
                 }
             } -ThrottleLimit $Parallel
@@ -114,16 +115,12 @@ try {
             $failure += ($results | Where-Object { $_ -eq "FAIL" }).Count
             $total += $results.Count
 
-            Write-Host "Parallel Progress: $total requests | OK: $success | FAIL: $failure" -ForegroundColor Cyan
+            Write-Host "  Parallel Progress: $total / $RequestCount | OK: $success | FAIL: $failure" -ForegroundColor Cyan
         }
     }
     else {
         # Sequential execution
-        $total = 0
-        $success = 0
-        $failure = 0
-
-        while ($true) {
+        while ($total -lt $RequestCount) {
             try {
                 $response = Invoke-WebRequest -Uri $TargetUrl -Method POST -TimeoutSec 10 -ErrorAction SilentlyContinue
                 if ($response.StatusCode -eq 200) { $success++ } else { $failure++ }
@@ -133,8 +130,8 @@ try {
             }
             $total++
 
-            if ($total % 30 -eq 0) {
-                Write-Host "  Progress: $total requests | OK: $success | FAIL: $failure" -ForegroundColor Cyan
+            if ($total % 10 -eq 0) {
+                Write-Host "  Progress: $total / $RequestCount | OK: $success | FAIL: $failure" -ForegroundColor Cyan
             }
         }
     }

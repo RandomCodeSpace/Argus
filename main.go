@@ -22,9 +22,11 @@ import (
 	"github.com/RandomCodeSpace/argus/internal/realtime"
 	"github.com/RandomCodeSpace/argus/internal/storage"
 	"github.com/RandomCodeSpace/argus/internal/telemetry"
+	"github.com/RandomCodeSpace/argus/internal/tsdb"
 	"github.com/RandomCodeSpace/argus/web"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
 	_ "google.golang.org/grpc/encoding/gzip" // Register gzip decompressor
@@ -58,7 +60,7 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	slog.Info("🚀 Starting Argus V5.0", "env", cfg.Env, "log_level", level)
+	slog.Info("🚀 Starting Argus V5.3", "env", cfg.Env, "log_level", level)
 
 	// 1. Initialize Internal Telemetry (first — everything registers metrics against this)
 	metrics := telemetry.New()
@@ -107,8 +109,15 @@ func main() {
 	)
 	ctxEvents, cancelEvents := context.WithCancel(context.Background())
 	defer cancelEvents()
-	go eventHub.Start(ctxEvents, 5*time.Second)
-	slog.Info("⚡ Event notification hub started (5s flush)")
+	go eventHub.Start(ctxEvents, 5*time.Second, 500*time.Millisecond)
+	slog.Info("⚡ Event notification hub started (5s snapshots, 500ms batches)")
+
+	// 4c. Initialize TSDB Aggregator
+	tsdbAgg := tsdb.NewAggregator(repo, 10*time.Second)
+	ctxTSDB, cancelTSDB := context.WithCancel(context.Background())
+	defer cancelTSDB()
+	go tsdbAgg.Start(ctxTSDB)
+	slog.Info("📈 TSDB Aggregator started (10s window)")
 
 	// 5. Initialize AI Service
 	aiService := ai.NewService(repo)
@@ -120,11 +129,22 @@ func main() {
 	// 7. Initialize OTLP Ingestion (gRPC)
 	traceServer := ingest.NewTraceServer(repo, metrics, cfg)
 	logsServer := ingest.NewLogsServer(repo, metrics, cfg)
+	metricsServer := ingest.NewMetricsServer(repo, metrics, tsdbAgg, cfg)
 
 	// Wire up live log streaming + AI + DLQ metrics
 	logHandler := func(l storage.Log) {
 		start := time.Now()
-		apiServer.BroadcastLog(l)
+		eventHub.BroadcastLog(realtime.LogEntry{
+			ID:             l.ID,
+			TraceID:        l.TraceID,
+			SpanID:         l.SpanID,
+			Severity:       l.Severity,
+			Body:           string(l.Body),
+			ServiceName:    l.ServiceName,
+			AttributesJSON: string(l.AttributesJSON),
+			AIInsight:      string(l.AIInsight),
+			Timestamp:      l.Timestamp,
+		})
 		aiService.EnqueueLog(l)
 		eventHub.NotifyRefresh()
 		if time.Since(start) > 100*time.Millisecond {
@@ -134,6 +154,16 @@ func main() {
 
 	logsServer.SetLogCallback(logHandler)
 	traceServer.SetLogCallback(logHandler)
+
+	metricsServer.SetMetricCallback(func(m tsdb.RawMetric) {
+		eventHub.BroadcastMetric(realtime.MetricEntry{
+			Name:        m.Name,
+			ServiceName: m.ServiceName,
+			Value:       m.Value,
+			Timestamp:   m.Timestamp,
+			Attributes:  m.Attributes,
+		})
+	})
 
 	// Update DLQ size metric periodically
 	go func() {
@@ -155,6 +185,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 	coltracepb.RegisterTraceServiceServer(grpcServer, traceServer)
 	collogspb.RegisterLogsServiceServer(grpcServer, logsServer)
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, metricsServer)
 	reflection.Register(grpcServer)
 
 	go func() {
@@ -222,29 +253,30 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
-	slog.Info("Shutting down ARGUS V5.0...")
+	slog.Info("Shutting down ARGUS V5.3...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	tsdbAgg.Stop()
 	grpcServer.GracefulStop()
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("HTTP server forced shutdown", "error", err)
 	}
 
-	slog.Info("✅ ARGUS V5.0 shutdown complete")
+	slog.Info("✅ ARGUS V5.3 shutdown complete")
 }
 
 func printBanner() {
 	banner := `
-     _    ____   ____ _   _ ____   __     _____  ___  
-    / \  |  _ \ / ___| | | / ___|  \ \   / / ___|| _ \ 
-   / _ \ | |_) | |  _| | | \___ \   \ \ / /|___ \| | | |
-  / ___ \|  _ <| |_| | |_| |___) |   \ V /  ___) | |_| |
- /_/   \_\_| \_\\____|\\___/|____/     \_/  |____/|___/ 
+     _    ____   ____ _   _ ____   __     _____ _____ ____  
+    / \  |  _ \ / ___| | | / ___|  \ \   / / ___|___ /|  _ \ 
+   / _ \ | |_) | |  _| | | \___ \   \ \ / /|___ \ |_ \| | | |
+  / ___ \|  _ <| |_| | |_| |___) |   \ V /  ___) |__) | |_| |
+ /_/   \_\_| \_\\____|\\___/|____/     \_/  |____/____/|____/ 
 
- ARGUS V5.0 (DEV MODE) — Production Hardened Edition
- The Eye That Never Sleeps 👁️
+  ARGUS V5.3 (EMBEDDED TSDB) — High Performance Edition
+  The Eye That Never Sleeps 👁️
 `
 	fmt.Println(banner)
 }

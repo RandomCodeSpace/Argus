@@ -12,7 +12,6 @@ import (
 )
 
 // LogEntry is a lightweight struct for WebSocket broadcast payloads.
-// It mirrors storage.Log but avoids importing the storage package for loose coupling.
 type LogEntry struct {
 	ID             uint      `json:"id"`
 	TraceID        string    `json:"trace_id"`
@@ -23,6 +22,21 @@ type LogEntry struct {
 	AttributesJSON string    `json:"attributes_json"`
 	AIInsight      string    `json:"ai_insight,omitempty"`
 	Timestamp      time.Time `json:"timestamp"`
+}
+
+// MetricEntry represents a raw metric point for real-time visualization.
+type MetricEntry struct {
+	Name        string                 `json:"name"`
+	ServiceName string                 `json:"service_name"`
+	Value       float64                `json:"value"`
+	Timestamp   time.Time              `json:"timestamp"`
+	Attributes  map[string]interface{} `json:"attributes"`
+}
+
+// HubBatch is a unified payload for WebSocket broadcasts.
+type HubBatch struct {
+	Type string      `json:"type"` // "logs" or "metrics"
+	Data interface{} `json:"data"` // Slice of entries
 }
 
 // Hub is a buffered WebSocket broadcast hub.
@@ -36,8 +50,10 @@ type Hub struct {
 	register   chan *client
 	unregister chan *client
 	broadcast  chan LogEntry
+	metricsCh  chan MetricEntry
 
-	buffer        []LogEntry
+	logBuffer     []LogEntry
+	metricBuffer  []MetricEntry
 	bufferMu      sync.Mutex
 	maxBufferSize int
 	flushInterval time.Duration
@@ -63,7 +79,9 @@ func NewHub(onConnectionChange func(count int)) *Hub {
 		register:           make(chan *client),
 		unregister:         make(chan *client),
 		broadcast:          make(chan LogEntry, 5000),
-		buffer:             make([]LogEntry, 0, 100),
+		metricsCh:          make(chan MetricEntry, 5000),
+		logBuffer:          make([]LogEntry, 0, 100),
+		metricBuffer:       make([]MetricEntry, 0, 100),
 		maxBufferSize:      100,
 		flushInterval:      500 * time.Millisecond,
 		stopCh:             make(chan struct{}),
@@ -82,7 +100,6 @@ func (h *Hub) Run() {
 	for {
 		select {
 		case <-h.stopCh:
-			// Flush remaining buffer before exit
 			h.flush()
 			return
 
@@ -105,8 +122,18 @@ func (h *Hub) Run() {
 
 		case entry := <-h.broadcast:
 			h.bufferMu.Lock()
-			h.buffer = append(h.buffer, entry)
-			shouldFlush := len(h.buffer) >= h.maxBufferSize
+			h.logBuffer = append(h.logBuffer, entry)
+			shouldFlush := len(h.logBuffer) >= h.maxBufferSize
+			h.bufferMu.Unlock()
+
+			if shouldFlush {
+				h.flush()
+			}
+
+		case metric := <-h.metricsCh:
+			h.bufferMu.Lock()
+			h.metricBuffer = append(h.metricBuffer, metric)
+			shouldFlush := len(h.metricBuffer) >= h.maxBufferSize
 			h.bufferMu.Unlock()
 
 			if shouldFlush {
@@ -119,21 +146,37 @@ func (h *Hub) Run() {
 	}
 }
 
-// flush sends the buffered logs as a JSON array to all connected clients.
+// flush sends the buffered logs and metrics as JSON batches to all connected clients.
 func (h *Hub) flush() {
 	h.bufferMu.Lock()
-	if len(h.buffer) == 0 {
+	if len(h.logBuffer) == 0 && len(h.metricBuffer) == 0 {
 		h.bufferMu.Unlock()
 		return
 	}
-	// Swap buffer
-	batch := h.buffer
-	h.buffer = make([]LogEntry, 0, h.maxBufferSize)
+
+	// Swap buffers
+	logBatch := h.logBuffer
+	h.logBuffer = make([]LogEntry, 0, h.maxBufferSize)
+
+	metricBatch := h.metricBuffer
+	h.metricBuffer = make([]MetricEntry, 0, h.maxBufferSize)
 	h.bufferMu.Unlock()
 
+	// Broadcast Logs if any
+	if len(logBatch) > 0 {
+		h.broadcastBatch(HubBatch{Type: "logs", Data: logBatch})
+	}
+
+	// Broadcast Metrics if any
+	if len(metricBatch) > 0 {
+		h.broadcastBatch(HubBatch{Type: "metrics", Data: metricBatch})
+	}
+}
+
+func (h *Hub) broadcastBatch(batch HubBatch) {
 	data, err := json.Marshal(batch)
 	if err != nil {
-		slog.Error("Hub: failed to marshal batch", "error", err)
+		slog.Error("Hub: failed to marshal batch", "error", err, "type", batch.Type)
 		return
 	}
 
@@ -141,7 +184,6 @@ func (h *Hub) flush() {
 		select {
 		case c.send <- data:
 		default:
-			// Client is too slow, disconnect it
 			delete(h.clients, c)
 			close(c.send)
 			slog.Warn("Hub: slow client removed", "total", len(h.clients))
@@ -157,7 +199,16 @@ func (h *Hub) Broadcast(entry LogEntry) {
 	select {
 	case h.broadcast <- entry:
 	default:
-		// Drop if internal channel is full to avoid blocking ingestion
+		// Drop if internal channel is full
+	}
+}
+
+// BroadcastMetric adds a metric entry to the broadcast buffer.
+func (h *Hub) BroadcastMetric(entry MetricEntry) {
+	select {
+	case h.metricsCh <- entry:
+	default:
+		// Drop if internal channel is full
 	}
 }
 
