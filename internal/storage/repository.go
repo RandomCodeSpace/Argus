@@ -129,6 +129,19 @@ func (r *Repository) GetMetricBuckets(start, end time.Time, serviceName string, 
 	return buckets, nil
 }
 
+// GetMetricNames returns a list of distinct metric names, optionally filtered by service.
+func (r *Repository) GetMetricNames(serviceName string) ([]string, error) {
+	var names []string
+	query := r.db.Model(&MetricBucket{})
+	if serviceName != "" {
+		query = query.Where("service_name = ?", serviceName)
+	}
+	if err := query.Distinct("name").Order("name ASC").Pluck("name", &names).Error; err != nil {
+		return nil, fmt.Errorf("failed to get metric names: %w", err)
+	}
+	return names, nil
+}
+
 // CreateTrace inserts a new trace, skipping if it already exists.
 func (r *Repository) CreateTrace(trace Trace) error {
 	var tx *gorm.DB

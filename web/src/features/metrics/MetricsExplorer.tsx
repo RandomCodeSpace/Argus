@@ -22,8 +22,29 @@ import type { MetricBucket, MetricEntry } from '../../types'
 export function MetricsExplorer() {
     const { isLive } = useLiveMode()
     const tr = useTimeRange('5m')
-    const [selectedMetric, setSelectedMetric] = useState<string | null>('orders_processed_total')
+    const [selectedMetric, setSelectedMetric] = useState<string | null>(null)
     const [selectedService] = useFilterParam('service', null)
+
+    // --- 0. Metric Discovery (Available Names) ---
+    const { data: availableMetrics = [] } = useQuery<string[]>({
+        queryKey: ['metadata', 'metrics', selectedService],
+        queryFn: async () => {
+            const params = new URLSearchParams()
+            if (selectedService) params.append('service_name', selectedService)
+            const res = await fetch(`/api/metadata/metrics?${params.toString()}`)
+            if (!res.ok) throw new Error('Failed to discover metrics')
+            return res.json()
+        },
+    })
+
+    // Auto-select first metric if none selected or current is invalid
+    useMemo(() => {
+        if (availableMetrics.length > 0) {
+            if (!selectedMetric || !availableMetrics.includes(selectedMetric)) {
+                setSelectedMetric(availableMetrics[0])
+            }
+        }
+    }, [availableMetrics, selectedMetric])
 
     // --- 1. Historical Data (TSDB Buckets) ---
     const { data: historicalBuckets, isFetching: isFetchingHistorical } = useQuery<MetricBucket[]>({
@@ -174,15 +195,12 @@ export function MetricsExplorer() {
                 <Group gap="lg">
                     <Select
                         label="Metric Name"
-                        placeholder="Select metric..."
+                        placeholder={availableMetrics.length > 0 ? "Select metric..." : "No metrics found"}
                         size="xs"
-                        data={[
-                            { value: 'orders_processed_total', label: 'orders_processed_total' },
-                            { value: 'active_payments', label: 'active_payments' },
-                            { value: 'inventory_queries_total', label: 'inventory_queries_total' },
-                        ]}
+                        data={availableMetrics.map(m => ({ value: m, label: m }))}
                         value={selectedMetric}
                         onChange={setSelectedMetric}
+                        disabled={availableMetrics.length === 0}
                         style={{ width: 250 }}
                     />
                 </Group>

@@ -223,3 +223,17 @@ func (s *Server) handleGetMetricBuckets(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(buckets)
 }
+
+// handleGetMetricNames handles GET /api/metadata/metrics
+func (s *Server) handleGetMetricNames(w http.ResponseWriter, r *http.Request) {
+	serviceName := r.URL.Query().Get("service_name")
+
+	names, err := s.repo.GetMetricNames(serviceName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(names)
+}

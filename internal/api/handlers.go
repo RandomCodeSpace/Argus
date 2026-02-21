@@ -43,6 +43,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/logs/context", s.handleGetLogContext)
 	mux.HandleFunc("GET /api/logs/{id}/insight", s.handleGetLogInsight)
 	mux.HandleFunc("GET /api/metadata/services", s.handleGetServices)
+	mux.HandleFunc("GET /api/metadata/metrics", s.handleGetMetricNames)
 	mux.HandleFunc("GET /api/health", s.metrics.HealthHandler())
 	mux.Handle("GET /metrics", telemetry.PrometheusHandler())
 	mux.HandleFunc("/ws", s.hub.HandleWebSocket)

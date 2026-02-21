@@ -113,11 +113,11 @@ func main() {
 	slog.Info("⚡ Event notification hub started (5s snapshots, 500ms batches)")
 
 	// 4c. Initialize TSDB Aggregator
-	tsdbAgg := tsdb.NewAggregator(repo, 10*time.Second)
+	tsdbAgg := tsdb.NewAggregator(repo, 30*time.Second)
 	ctxTSDB, cancelTSDB := context.WithCancel(context.Background())
 	defer cancelTSDB()
 	go tsdbAgg.Start(ctxTSDB)
-	slog.Info("📈 TSDB Aggregator started (10s window)")
+	slog.Info("📈 TSDB Aggregator started (30s window)")
 
 	// 5. Initialize AI Service
 	aiService := ai.NewService(repo)
