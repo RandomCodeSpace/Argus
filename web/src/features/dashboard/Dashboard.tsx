@@ -144,7 +144,7 @@ export function Dashboard() {
             type: 'pie',
             radius: ['40%', '70%'],
             avoidLabelOverlap: false,
-            itemStyle: { borderRadius: 10, borderColor: '#1A1B1E', borderWidth: 2 },
+            itemStyle: { borderRadius: 10, borderColor: '#ffffffff', borderWidth: 4 },
             label: { show: false, position: 'center' },
             emphasis: { label: { show: true, fontSize: 16, fontWeight: 'bold' } },
             labelLine: { show: false },
