@@ -7,16 +7,14 @@ import {
     Badge,
     Text,
     Box,
-    Switch,
 } from '@mantine/core'
 import {
     LayoutDashboard,
     Network,
     ScrollText,
-    Activity,
+    Zap,
+    BarChart3,
     Settings,
-    Play,
-    Pause,
 } from 'lucide-react'
 
 import { Dashboard } from '../features/dashboard/Dashboard'
@@ -24,21 +22,22 @@ import { LogExplorer } from '../features/logs/LogExplorer'
 import { ServiceMap } from '../features/topology/ServiceMap'
 import { SettingsPage } from '../features/settings/Settings'
 import { TraceExplorer } from '../features/traces/TraceExplorer'
-import { useLiveMode } from '../contexts/LiveModeContext'
+import { MetricsExplorer } from '../features/metrics/MetricsExplorer'
 
-type PageKey = 'dashboard' | 'map' | 'logs' | 'traces' | 'settings'
+
+type PageKey = 'dashboard' | 'map' | 'logs' | 'traces' | 'metrics' | 'settings'
 
 const navItems: { key: PageKey; label: string; icon: typeof LayoutDashboard }[] = [
     { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { key: 'map', label: 'Service Map', icon: Network },
     { key: 'logs', label: 'Logs', icon: ScrollText },
-    { key: 'traces', label: 'Traces', icon: Activity },
+    { key: 'traces', label: 'Traces', icon: Zap },
+    { key: 'metrics', label: 'Metrics', icon: BarChart3 },
     { key: 'settings', label: 'Settings', icon: Settings },
 ]
 
 export function AppLayout() {
     const [active, setActive] = useFilterParamString('page', 'dashboard') as [PageKey, (v: string) => void]
-    const { isLive, isConnected, setIsLive } = useLiveMode()
 
     const renderPage = () => {
         switch (active) {
@@ -46,6 +45,7 @@ export function AppLayout() {
             case 'map': return <ServiceMap />
             case 'logs': return <LogExplorer />
             case 'traces': return <TraceExplorer />
+            case 'metrics': return <MetricsExplorer />
             case 'settings': return <SettingsPage />
         }
     }
@@ -68,31 +68,6 @@ export function AppLayout() {
                         <Badge size="xs" variant="gradient" gradient={{ from: 'indigo', to: 'cyan' }}>{__APP_VERSION__}</Badge>
                     </Box>
                 </Group>
-
-                {/* Live Mode Toggle */}
-                <Box mb="md" px="xs">
-                    <Switch
-                        label={
-                            <Group gap={6}>
-                                <Text size="sm" c="var(--argus-sidebar-text)" fw={500}>Live Mode</Text>
-                                {isLive && (
-                                    <Badge
-                                        variant="dot"
-                                        color={isConnected ? 'green' : 'red'}
-                                        size="xs"
-                                    >
-                                        {isConnected ? 'ON' : '...'}
-                                    </Badge>
-                                )}
-                            </Group>
-                        }
-                        checked={isLive}
-                        onChange={(e) => setIsLive(e.currentTarget.checked)}
-                        onLabel={<Play size={12} />}
-                        offLabel={<Pause size={12} />}
-                        size="md"
-                    />
-                </Box>
 
                 {/* Navigation */}
                 {navItems.map((item) => (
@@ -124,7 +99,11 @@ export function AppLayout() {
                 </Box>
             </AppShell.Navbar>
 
-            <AppShell.Main>{renderPage()}</AppShell.Main>
+            <AppShell.Main style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+                <Box style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                    {renderPage()}
+                </Box>
+            </AppShell.Main>
         </AppShell>
     )
 }

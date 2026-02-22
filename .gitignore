@@ -111,3 +111,7 @@ go.work.sum
 .idea/
 
 .dev-pids
+
+*argus*.db*
+
+.agent/

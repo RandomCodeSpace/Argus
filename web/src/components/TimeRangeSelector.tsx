@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { Group, Select } from '@mantine/core'
 import { useFilterParam } from '../hooks/useFilterParams'
+import { useLiveMode } from '../contexts/LiveModeContext'
 
 export const TIME_RANGES = [
     { value: '5m', label: 'Last 5 min' },
@@ -36,7 +37,6 @@ export function TimeRangeSelector({
     onChange,
 }: TimeRangeSelectorProps) {
     // If value is not a known preset, default to 5m for display or handle gracefully
-    // But since we removed custom options, we can force a selection if invalid
     const selectedValue = (value && RANGE_MINUTES[value]) ? value : '5m'
 
     return (
@@ -55,15 +55,10 @@ export function TimeRangeSelector({
 
 /** Hook for time range state — persisted to URL search params */
 export function useTimeRange(defaultRange = '5m') {
-    // We only rely on 'range' param now.
-    // If 'range' is missing, we default to provided defaultRange.
-    // If 'from'/'to' are present (e.g. from drilldown), we currently ignore them in favor of range
-    // UNLESS range is explicitly missing.
-    // However, the requirement is "persist range as global filter".
-
     const [rangeParam, setRangeParam] = useFilterParam('range', null)
     const [fromParam, setFromParam] = useFilterParam('from', null)
     const [toParam, setToParam] = useFilterParam('to', null)
+    const { refreshTrigger, refresh } = useLiveMode()
 
     // Helper to clear discrete params when setting a range
     const setTimeRange = (val: string) => {
@@ -90,14 +85,14 @@ export function useTimeRange(defaultRange = '5m') {
         const times = getRangeTimes(defaultRange)
         return { timeRange: defaultRange, start: times.start, end: times.end }
 
-    }, [rangeParam, fromParam, toParam, defaultRange])
+    }, [rangeParam, fromParam, toParam, defaultRange, refreshTrigger])
 
     return {
-        timeRange,   // Is 'custom' if using from/to, otherwise the preset key (e.g., '5m')
+        timeRange,
         setTimeRange,
-        start,       // ISO string (calculated or from param)
-        end,         // ISO string (calculated or from param)
-        // We expose setters for from/to if advanced usage needs them (e.g. TraceExplorer)
+        start,
+        end,
+        refresh,
         setCustomRange: (s: string, e: string) => {
             setRangeParam(null)
             setFromParam(s)

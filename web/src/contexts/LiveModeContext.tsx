@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useRef, useCallback, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useFilterParamString } from '../hooks/useFilterParams'
-import type { DashboardStats, TrafficPoint, TraceResponse, ServiceMapMetrics } from '../types'
+import type { DashboardStats, TrafficPoint, TraceResponse, ServiceMapMetrics, HubBatch, LogEntry, MetricEntry } from '../types'
 
 interface LiveSnapshot {
     type: 'live_snapshot'
@@ -17,6 +17,8 @@ interface LiveModeContextValue {
     setIsLive: (live: boolean) => void
     serviceFilter: string
     setServiceFilter: (service: string) => void
+    refreshTrigger: number
+    refresh: () => void
 }
 
 const LiveModeContext = createContext<LiveModeContextValue>({
@@ -25,6 +27,8 @@ const LiveModeContext = createContext<LiveModeContextValue>({
     setIsLive: () => { },
     serviceFilter: '',
     setServiceFilter: () => { },
+    refreshTrigger: 0,
+    refresh: () => { },
 })
 
 /**
@@ -40,6 +44,7 @@ export function LiveModeProvider({ children }: { children: ReactNode }) {
 
     const [isConnected, setIsConnected] = useState(false)
     const [serviceFilter, setServiceFilterState] = useState('')
+    const [refreshTrigger, setRefreshTrigger] = useState(0)
     const wsRef = useRef<WebSocket | null>(null)
     const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const isLiveRef = useRef(isLive)
@@ -75,11 +80,30 @@ export function LiveModeProvider({ children }: { children: ReactNode }) {
         }
 
         if (snapshot.traces) {
-            queryClient.setQueryData(['live', 'traces'], snapshot.traces)
+            const limitedTraces = {
+                ...snapshot.traces,
+                traces: snapshot.traces.traces.slice(0, 50),
+                total: Math.min(snapshot.traces.total, 50)
+            }
+            queryClient.setQueryData(['live', 'traces'], limitedTraces)
         }
 
         if (snapshot.service_map) {
             queryClient.setQueryData(['live', 'serviceMapMetrics'], snapshot.service_map)
+        }
+    }, [queryClient])
+
+    const handleBatch = useCallback((batch: HubBatch) => {
+        if (batch.type === 'logs') {
+            // Buffer real-time logs (future explorer optimization)
+            queryClient.setQueryData(['live', 'logs'], (old: LogEntry[] | undefined) => {
+                return [...(batch.data as LogEntry[]), ...(old || [])].slice(0, 500)
+            })
+        } else if (batch.type === 'metrics') {
+            // Buffer real-time metrics for charts
+            queryClient.setQueryData(['live', 'realtime_metrics'], (old: MetricEntry[] | undefined) => {
+                return [...(old || []), ...(batch.data as MetricEntry[])].slice(-2000)
+            })
         }
     }, [queryClient])
 
@@ -117,9 +141,11 @@ export function LiveModeProvider({ children }: { children: ReactNode }) {
 
         ws.onmessage = (event) => {
             try {
-                const snapshot: LiveSnapshot = JSON.parse(event.data)
-                if (snapshot.type === 'live_snapshot') {
-                    handleSnapshot(snapshot)
+                const msg = JSON.parse(event.data)
+                if (msg.type === 'live_snapshot') {
+                    handleSnapshot(msg as LiveSnapshot)
+                } else if (msg.type === 'logs' || msg.type === 'metrics') {
+                    handleBatch(msg as HubBatch)
                 }
             } catch {
                 // Ignore malformed messages
@@ -157,7 +183,15 @@ export function LiveModeProvider({ children }: { children: ReactNode }) {
     }, [isLive, connect, cleanup])
 
     return (
-        <LiveModeContext.Provider value={{ isLive, isConnected, setIsLive, serviceFilter, setServiceFilter }}>
+        <LiveModeContext.Provider value={{
+            isLive,
+            isConnected,
+            setIsLive,
+            serviceFilter,
+            setServiceFilter,
+            refreshTrigger,
+            refresh: () => setRefreshTrigger(prev => prev + 1)
+        }}>
             {children}
         </LiveModeContext.Provider>
     )
