@@ -20,8 +20,7 @@ import type { LogResponse } from '../../types'
 import { useTimeRange, TIME_RANGES } from '../../components/TimeRangeSelector'
 import { useFilterParam, useFilterParamString } from '../../hooks/useFilterParams'
 import { GlobalControls } from '../../components/GlobalControls'
-import { LogRow } from './components/LogRow'
-import { LogDetails } from './components/LogDetails'
+import { LogRow, LogDetails } from './components'
 
 export function LogExplorer() {
     const [page, setPage] = useState(1)
