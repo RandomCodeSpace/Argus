@@ -11,7 +11,7 @@
 *.rar
 hs_err_pid*
 replay_pid*
-.idea/**/workspace.xml
+.idea/
 .idea/**/tasks.xml
 .idea/**/usage.statistics.xml
 .idea/**/dictionaries
@@ -121,3 +121,5 @@ go.work.sum
 *.stdout
 *.stderr
 *scheduled_tasks*
+tmp/
+data/
