@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -37,14 +38,30 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
+
+// Version is injected by GoReleaser at build time
+var Version = "dev"
+
 func main() {
+	versionFlag := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("Argus version %s\n", Version)
+		os.Exit(0)
+	}
+
 	// Force UTC timezone globally — prevents system timezone leaking into timestamps
 	time.Local = time.UTC
 
 	printBanner()
 
 	// 0. Load Configuration
-	cfg := config.Load()
+	cfg, err := config.Load("")
+	if err != nil {
+		slog.Error("failed to load configuration", "error", err)
+		os.Exit(1)
+	}
 
 	// Initialize structured logger
 	var level slog.Level
@@ -64,7 +81,7 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	slog.Info("🚀 Starting Argus V5.4", "env", cfg.Env, "log_level", level)
+	slog.Info("🚀 Starting Argus", "version", Version, "env", cfg.Env, "log_level", level)
 
 	// 1. Initialize Internal Telemetry (first — everything registers metrics against this)
 	metrics := telemetry.New()
@@ -397,8 +414,9 @@ func printBanner() {
   / ___ \|  _ <| |_| | |_| |___) |   \ V /  ___) |__) | |_| |
  /_/   \_\_| \_\\____|\\___/|____/     \_/  |____/____/|____/ 
 
-  ARGUS V5.4 (EMBEDDED TSDB) — High Performance Edition
+  ARGUS — High Performance Edition
   The Eye That Never Sleeps 👁️
+  Version: %s
 `
-	fmt.Println(banner)
+	fmt.Printf(banner, Version)
 }

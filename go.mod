@@ -1,13 +1,13 @@
 module github.com/RandomCodeSpace/argus
 
-go 1.25.7
+go 1.25.0
 
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/glebarez/sqlite v1.11.0
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.18.4
-	github.com/microsoft/go-mssqldb v1.9.8
+	github.com/microsoft/go-mssqldb v1.9.7
 	github.com/prometheus/client_golang v1.23.2
 	github.com/tmc/langchaingo v0.1.14
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0

@@ -66,8 +66,11 @@ type Config struct {
 	VectorIndexMaxEntries int
 }
 
-func Load() *Config {
+func Load(customPath string) (*Config, error) {
 	envFile := ".env"
+	if customPath != "" {
+		envFile = customPath
+	}
 
 	if _, err := os.Stat(envFile); !os.IsNotExist(err) {
 		if err := godotenv.Load(envFile); err != nil {
@@ -134,7 +137,7 @@ func Load() *Config {
 
 		// Vector
 		VectorIndexMaxEntries: getEnvInt("VECTOR_INDEX_MAX_ENTRIES", 100000),
-	}
+	}, nil
 }
 
 func getEnv(key, fallback string) string {
