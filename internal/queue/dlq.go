@@ -30,6 +30,12 @@ type DeadLetterQueue struct {
 
 	// Per-file retry tracking (in-memory; resets on restart)
 	retries map[string]int
+
+	// Metric callbacks (optional, set via SetMetrics)
+	onEnqueue func()
+	onSuccess func()
+	onFailure func()
+	onDiskBytes func(int64)
 }
 
 // NewDLQ creates a new Dead Letter Queue.
@@ -64,6 +70,32 @@ func NewDLQWithLimits(dir string, interval time.Duration, replayFn func(data []b
 	return dlq, nil
 }
 
+// SetMetrics wires Prometheus metric callbacks into the DLQ.
+func (d *DeadLetterQueue) SetMetrics(onEnqueue, onSuccess, onFailure func(), onDiskBytes func(int64)) {
+	d.mu.Lock()
+	d.onEnqueue = onEnqueue
+	d.onSuccess = onSuccess
+	d.onFailure = onFailure
+	d.onDiskBytes = onDiskBytes
+	d.mu.Unlock()
+}
+
+// DiskBytes returns the current total bytes of files in the DLQ directory.
+func (d *DeadLetterQueue) DiskBytes() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entries, _ := os.ReadDir(d.dir)
+	var total int64
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			if info, err := e.Info(); err == nil {
+				total += info.Size()
+			}
+		}
+	}
+	return total
+}
+
 // Enqueue serializes the given batch to JSON and writes it to disk.
 // Enforces file count and disk size limits (FIFO eviction when exceeded).
 func (d *DeadLetterQueue) Enqueue(batch interface{}) error {
@@ -86,6 +118,9 @@ func (d *DeadLetterQueue) Enqueue(batch interface{}) error {
 	}
 
 	slog.Warn("📦 Batch written to DLQ", "file", filename, "bytes", len(data))
+	if d.onEnqueue != nil {
+		d.onEnqueue()
+	}
 	return nil
 }
 
@@ -241,8 +276,12 @@ func (d *DeadLetterQueue) processFiles() {
 			d.mu.Lock()
 			d.retries[name]++
 			newRetries := d.retries[name]
+			cb := d.onFailure
 			d.mu.Unlock()
 			slog.Warn("DLQ: replay failed, backing off", "file", name, "retries", newRetries, "error", err)
+			if cb != nil {
+				cb()
+			}
 			// Touch the file to reset the backoff timer.
 			now := time.Now()
 			os.Chtimes(path, now, now)
@@ -251,14 +290,19 @@ func (d *DeadLetterQueue) processFiles() {
 
 		// Success — remove the file and clear retry counter.
 		d.mu.Lock()
+		var successCb func()
 		if err := os.Remove(path); err != nil {
 			slog.Error("DLQ: failed to remove replayed file", "file", name, "error", err)
 		} else {
 			delete(d.retries, name)
 			replayed++
+			successCb = d.onSuccess
 			slog.Info("✅ DLQ file replayed and removed", "file", name)
 		}
 		d.mu.Unlock()
+		if successCb != nil {
+			successCb()
+		}
 	}
 
 	if replayed > 0 {

@@ -19,8 +19,9 @@ type Server struct {
 	eventHub  *realtime.EventHub
 	metrics   *telemetry.Metrics
 	cache     *cache.TTLCache
-	graph     *graph.Graph     // in-memory service dependency graph (may be nil before first build)
-	vectorIdx *vectordb.Index  // TF-IDF semantic log search index
+	graph     *graph.Graph    // in-memory service dependency graph (may be nil before first build)
+	vectorIdx *vectordb.Index // TF-IDF semantic log search index
+	coldPath  string          // cold storage base path for archive search
 }
 
 // NewServer creates a new API server.
@@ -44,6 +45,11 @@ func (s *Server) SetVectorIndex(idx *vectordb.Index) {
 	s.vectorIdx = idx
 }
 
+// SetColdStoragePath sets the base path for cold archive search.
+func (s *Server) SetColdStoragePath(path string) {
+	s.coldPath = path
+}
+
 // RegisterRoutes registers API endpoints on the provided mux.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Metadata & Discovery
@@ -59,6 +65,9 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 
 	// System Graph (AI-consumable topology + health)
 	mux.HandleFunc("GET /api/system/graph", s.handleGetSystemGraph)
+
+	// Archive search (cold storage)
+	mux.HandleFunc("GET /api/archive/search", s.handleSearchColdArchive)
 
 	// Traces
 	mux.HandleFunc("GET /api/traces", s.handleGetTraces)

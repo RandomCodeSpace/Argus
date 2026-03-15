@@ -20,6 +20,7 @@ import (
 	"github.com/RandomCodeSpace/argus/internal/compress"
 	"github.com/RandomCodeSpace/argus/internal/config"
 	"github.com/RandomCodeSpace/argus/internal/storage"
+	"github.com/RandomCodeSpace/argus/internal/telemetry"
 )
 
 // Manifest describes what was archived in a single day directory.
@@ -39,10 +40,11 @@ type Manifest struct {
 
 // Archiver moves data older than the hot retention window to compressed cold files.
 type Archiver struct {
-	repo        *storage.Repository
-	cfg         *config.Config
+	repo         *storage.Repository
+	cfg          *config.Config
+	metrics      *telemetry.Metrics
 	recordsMoved atomic.Int64
-	lastRun     atomic.Value // stores time.Time
+	lastRun      atomic.Value // stores time.Time
 }
 
 // New creates a new Archiver.
@@ -51,6 +53,9 @@ func New(repo *storage.Repository, cfg *config.Config) *Archiver {
 	a.lastRun.Store(time.Time{})
 	return a
 }
+
+// SetMetrics wires Prometheus metrics into the archiver.
+func (a *Archiver) SetMetrics(m *telemetry.Metrics) { a.metrics = m }
 
 // RecordsMoved returns the total number of records moved to cold storage.
 func (a *Archiver) RecordsMoved() int64 { return a.recordsMoved.Load() }
@@ -123,9 +128,29 @@ func (a *Archiver) RunOnce(ctx context.Context) error {
 		slog.Warn("Archive: DB maintenance failed", "error", err)
 	}
 
+	if a.metrics != nil {
+		a.metrics.HotDBSizeBytes.Set(float64(a.repo.HotDBSizeBytes()))
+		a.metrics.ColdStorageBytes.Set(float64(coldStorageBytes(a.cfg.ColdStoragePath)))
+	}
+
 	a.lastRun.Store(time.Now())
 	slog.Info("✅ Archival pass complete")
 	return nil
+}
+
+// coldStorageBytes walks the cold storage directory and sums file sizes.
+func coldStorageBytes(coldPath string) int64 {
+	var total int64
+	filepath.WalkDir(coldPath, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // archiveDay moves all data for a single UTC day to cold storage.
@@ -177,6 +202,12 @@ func (a *Archiver) archiveDay(ctx context.Context, date time.Time) error {
 
 	total := int64(tCount + lCount + mCount)
 	a.recordsMoved.Add(total)
+
+	if a.metrics != nil {
+		a.metrics.ArchiveRecordsMoved.WithLabelValues("traces").Add(float64(tCount))
+		a.metrics.ArchiveRecordsMoved.WithLabelValues("logs").Add(float64(lCount))
+		a.metrics.ArchiveRecordsMoved.WithLabelValues("metrics").Add(float64(mCount))
+	}
 
 	slog.Info("📦 Day archived",
 		"date", manifest.Date,

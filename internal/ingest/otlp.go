@@ -332,11 +332,13 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 	}
 
 	if len(spansToInsert) > 0 {
+		if s.metrics != nil {
+			s.metrics.GRPCBatchSize.Observe(float64(len(spansToInsert)))
+		}
 		if err := s.repo.BatchCreateSpans(spansToInsert); err != nil {
 			slog.Error("❌ Failed to insert spans", "error", err)
 			return nil, err
 		}
-		// slog.Debug("✅ Successfully persisted spans", "count", len(spansToInsert))
 		if s.metrics != nil {
 			s.metrics.RecordIngestion(len(spansToInsert))
 		}

@@ -94,6 +94,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize DLQ: %v", err)
 	}
+	dlq.SetMetrics(
+		func() { metrics.DLQEnqueuedTotal.Inc() },
+		func() { metrics.DLQReplaySuccess.Inc() },
+		func() { metrics.DLQReplayFailure.Inc() },
+		func(b int64) { metrics.DLQDiskBytes.Set(float64(b)) },
+	)
 	defer dlq.Stop()
 	slog.Info("🔁 DLQ initialized", "path", cfg.DLQPath, "interval", replayInterval)
 
@@ -101,6 +107,10 @@ func main() {
 	hub := realtime.NewHub(func(count int) {
 		metrics.SetActiveConnections(count)
 	})
+	hub.SetWSMetrics(
+		func(msgType string) { metrics.WSMessagesSent.WithLabelValues(msgType).Inc() },
+		func() { metrics.WSSlowClientsRemoved.Inc() },
+	)
 	go hub.Run()
 	defer hub.Stop()
 	slog.Info("🔌 WebSocket hub started")
@@ -124,7 +134,10 @@ func main() {
 		})
 		slog.Info("📈 TSDB cardinality limit set", "max", cfg.MetricMaxCardinality)
 	}
-	// Attach ring buffer: 120 × 30s = 1 hour of per-metric sliding windows
+	tsdbAgg.SetMetrics(
+		func() { metrics.TSDBIngestTotal.Inc() },
+		func() { metrics.TSDBBatchesDropped.Inc() },
+	)
 	ringBuf := tsdb.NewRingBuffer(120, 30*time.Second)
 	tsdbAgg.SetRingBuffer(ringBuf)
 	slog.Info("📈 TSDB ring buffer attached (120 slots × 30s = 1h retention)")
@@ -136,6 +149,7 @@ func main() {
 
 	// 4d. Initialize Archive Worker (hot/cold storage tiering)
 	archiver := archive.New(repo, cfg)
+	archiver.SetMetrics(metrics)
 	ctxArchive, cancelArchive := context.WithCancel(context.Background())
 	defer cancelArchive()
 	go archiver.Start(ctxArchive)
@@ -173,6 +187,22 @@ func main() {
 	vectorIdx := vectordb.New(cfg.VectorIndexMaxEntries)
 	slog.Info("🔍 Vector index initialized", "max_entries", cfg.VectorIndexMaxEntries)
 
+	// Hydrate vector index from recent ERROR/WARN logs on startup (non-blocking).
+	go func() {
+		recentLogs, _, err := repo.GetLogsV2(storage.LogFilter{
+			Severity:  "ERROR",
+			StartTime: time.Now().Add(-24 * time.Hour),
+			EndTime:   time.Now(),
+			Limit:     5000,
+		})
+		if err == nil {
+			for _, l := range recentLogs {
+				vectorIdx.Add(l.ID, l.ServiceName, l.Severity, string(l.Body))
+			}
+			slog.Info("🔍 Vector index hydrated from recent ERROR logs", "count", len(recentLogs))
+		}
+	}()
+
 	// 5. Initialize AI Service
 	aiService := ai.NewService(repo)
 	defer aiService.Stop()
@@ -181,6 +211,7 @@ func main() {
 	apiServer := api.NewServer(repo, hub, eventHub, metrics)
 	apiServer.SetGraph(svcGraph)
 	apiServer.SetVectorIndex(vectorIdx)
+	apiServer.SetColdStoragePath(cfg.ColdStoragePath)
 
 	// 6b. Initialize MCP Server (HTTP Streamable, JSON-RPC 2.0 + SSE)
 	mcpServer := mcp.New(repo, metrics, svcGraph, vectorIdx)
@@ -245,6 +276,7 @@ func main() {
 			select {
 			case <-ticker.C:
 				metrics.SetDLQSize(dlq.Size())
+				metrics.DLQDiskBytes.Set(float64(dlq.DiskBytes()))
 			}
 		}
 	}()

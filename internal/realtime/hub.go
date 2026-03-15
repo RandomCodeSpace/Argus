@@ -62,8 +62,11 @@ type Hub struct {
 	wg     sync.WaitGroup
 
 	// onConnectionChange is called when the number of active connections changes.
-	// Used to update Prometheus gauge.
 	onConnectionChange func(count int)
+
+	// Metric callbacks (optional)
+	onMessageSent    func(msgType string) // WSMessagesSent.WithLabelValues(type).Inc()
+	onSlowClientDrop func()              // WSSlowClientsRemoved.Inc()
 
 	logPool    sync.Pool
 	metricPool sync.Pool
@@ -199,9 +202,11 @@ func (h *Hub) broadcastBatch(batch HubBatch) {
 		return
 	}
 
+	sent := 0
 	for c := range h.clients {
 		select {
 		case c.send <- data:
+			sent++
 		default:
 			delete(h.clients, c)
 			close(c.send)
@@ -209,8 +214,20 @@ func (h *Hub) broadcastBatch(batch HubBatch) {
 			if h.onConnectionChange != nil {
 				h.onConnectionChange(len(h.clients))
 			}
+			if h.onSlowClientDrop != nil {
+				h.onSlowClientDrop()
+			}
 		}
 	}
+	if sent > 0 && h.onMessageSent != nil {
+		h.onMessageSent(batch.Type)
+	}
+}
+
+// SetWSMetrics wires WebSocket metric callbacks.
+func (h *Hub) SetWSMetrics(onMessageSent func(string), onSlowClientDrop func()) {
+	h.onMessageSent = onMessageSent
+	h.onSlowClientDrop = onSlowClientDrop
 }
 
 // Broadcast adds a log entry to the broadcast buffer.

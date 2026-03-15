@@ -38,6 +38,10 @@ type Aggregator struct {
 
 	// Ring buffer accelerator (optional)
 	ring *RingBuffer
+
+	// Metric callbacks
+	onIngest  func() // TSDBIngestTotal.Inc()
+	onDropped func() // TSDBBatchesDropped.Inc()
 }
 
 const persistenceWorkers = 3
@@ -68,11 +72,18 @@ func (a *Aggregator) SetCardinalityLimit(max int, onOverflow func()) {
 }
 
 // SetRingBuffer attaches a RingBuffer that receives every ingested data point.
-// Dashboard queries for recent data (last 1h) can read from the ring directly.
 func (a *Aggregator) SetRingBuffer(rb *RingBuffer) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ring = rb
+}
+
+// SetMetrics wires Prometheus metric callbacks.
+func (a *Aggregator) SetMetrics(onIngest, onDropped func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onIngest = onIngest
+	a.onDropped = onDropped
 }
 
 // Start begins the aggregation background processes.
@@ -110,9 +121,12 @@ func (a *Aggregator) Ingest(m RawMetric) {
 	attrJSON, _ := json.Marshal(m.Attributes)
 	key := fmt.Sprintf("%s|%s|%s", m.ServiceName, m.Name, string(attrJSON))
 
-	// Feed ring buffer outside the lock (RingBuffer is independently thread-safe).
+	// Feed ring buffer and metric counter outside the lock (both are thread-safe).
 	if a.ring != nil {
 		a.ring.Record(m.Name, m.ServiceName, m.Value, m.Timestamp)
+	}
+	if a.onIngest != nil {
+		a.onIngest()
 	}
 
 	a.mu.Lock()
@@ -200,6 +214,9 @@ func (a *Aggregator) flush() {
 	case a.flushChan <- batch:
 	default:
 		a.droppedBatches++
+		if a.onDropped != nil {
+			a.onDropped()
+		}
 		slog.Warn("⚠️ TSDB flush channel full, dropping metric batch", "count", len(batch), "total_dropped", a.droppedBatches)
 		batch = batch[:0]
 		a.pool.Put(batch)
