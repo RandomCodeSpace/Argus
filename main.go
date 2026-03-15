@@ -118,6 +118,12 @@ func main() {
 
 	// 4c. Initialize TSDB Aggregator
 	tsdbAgg := tsdb.NewAggregator(repo, 30*time.Second)
+	if cfg.MetricMaxCardinality > 0 {
+		tsdbAgg.SetCardinalityLimit(cfg.MetricMaxCardinality, func() {
+			metrics.TSDBCardinalityOverflow.Inc()
+		})
+		slog.Info("📈 TSDB cardinality limit set", "max", cfg.MetricMaxCardinality)
+	}
 	ctxTSDB, cancelTSDB := context.WithCancel(context.Background())
 	defer cancelTSDB()
 	go tsdbAgg.Start(ctxTSDB)
@@ -302,9 +308,16 @@ func main() {
 		}))
 	})
 
+	var httpHandler http.Handler = api.MetricsMiddleware(metrics, mux)
+	if cfg.APIRateLimitRPS > 0 {
+		rl := api.NewRateLimiter(cfg.APIRateLimitRPS)
+		httpHandler = rl.Middleware(httpHandler)
+		slog.Info("🛡️  API rate limiter enabled", "rps_per_ip", cfg.APIRateLimitRPS)
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.HTTPPort,
-		Handler: api.MetricsMiddleware(metrics, mux),
+		Handler: httpHandler,
 	}
 
 	go func() {

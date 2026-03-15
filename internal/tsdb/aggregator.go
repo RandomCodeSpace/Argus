@@ -30,6 +30,11 @@ type Aggregator struct {
 	flushChan       chan []storage.MetricBucket
 	pool            sync.Pool
 	droppedBatches  int64
+
+	// Cardinality controls
+	maxCardinality     int          // 0 = unlimited
+	cardinalityOverflow func()       // called when overflow bucket is used (for metrics)
+	overflowKey        string       // constant key for the overflow bucket
 }
 
 const persistenceWorkers = 3
@@ -37,16 +42,26 @@ const persistenceWorkers = 3
 // NewAggregator creates a new TSDB aggregator.
 func NewAggregator(repo *storage.Repository, windowSize time.Duration) *Aggregator {
 	a := &Aggregator{
-		repo:       repo,
-		windowSize: windowSize,
-		buckets:    make(map[string]*storage.MetricBucket),
-		stopChan:   make(chan struct{}),
-		flushChan:  make(chan []storage.MetricBucket, 500), // increased from 100
+		repo:        repo,
+		windowSize:  windowSize,
+		buckets:     make(map[string]*storage.MetricBucket),
+		stopChan:    make(chan struct{}),
+		flushChan:   make(chan []storage.MetricBucket, 500),
+		overflowKey: "__cardinality_overflow__",
 	}
 	a.pool.New = func() interface{} {
 		return make([]storage.MetricBucket, 0, 100)
 	}
 	return a
+}
+
+// SetCardinalityLimit configures the maximum number of distinct metric series.
+// When exceeded, new series are routed to an overflow bucket and onOverflow is called.
+func (a *Aggregator) SetCardinalityLimit(max int, onOverflow func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.maxCardinality = max
+	a.cardinalityOverflow = onOverflow
 }
 
 // Start begins the aggregation background processes.
@@ -89,19 +104,42 @@ func (a *Aggregator) Ingest(m RawMetric) {
 
 	bucket, exists := a.buckets[key]
 	if !exists {
-		windowStart := m.Timestamp.Truncate(a.windowSize)
-		bucket = &storage.MetricBucket{
-			Name:           m.Name,
-			ServiceName:    m.ServiceName,
-			TimeBucket:     windowStart,
-			Min:            m.Value,
-			Max:            m.Value,
-			Sum:            m.Value,
-			Count:          1,
-			AttributesJSON: storage.CompressedText(attrJSON),
+		// Cardinality guard: if limit exceeded, route to overflow bucket.
+		if a.maxCardinality > 0 && len(a.buckets) >= a.maxCardinality {
+			if a.cardinalityOverflow != nil {
+				a.cardinalityOverflow()
+			}
+			key = a.overflowKey
+			bucket = a.buckets[key]
+			if bucket == nil {
+				windowStart := m.Timestamp.Truncate(a.windowSize)
+				bucket = &storage.MetricBucket{
+					Name:        "__overflow__",
+					ServiceName: m.ServiceName,
+					TimeBucket:  windowStart,
+					Min:         m.Value,
+					Max:         m.Value,
+					Sum:         m.Value,
+					Count:       1,
+				}
+				a.buckets[key] = bucket
+			}
+			// Fall through to update existing overflow bucket below.
+		} else {
+			windowStart := m.Timestamp.Truncate(a.windowSize)
+			bucket = &storage.MetricBucket{
+				Name:           m.Name,
+				ServiceName:    m.ServiceName,
+				TimeBucket:     windowStart,
+				Min:            m.Value,
+				Max:            m.Value,
+				Sum:            m.Value,
+				Count:          1,
+				AttributesJSON: storage.CompressedText(attrJSON),
+			}
+			a.buckets[key] = bucket
+			return
 		}
-		a.buckets[key] = bucket
-		return
 	}
 
 	if m.Value < bucket.Min {
