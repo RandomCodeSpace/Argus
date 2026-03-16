@@ -4,7 +4,6 @@ go 1.25.0
 
 require github.com/RandomCodeSpace/central-ops v0.1.0
 
-
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/glebarez/sqlite v1.11.0
