@@ -60,6 +60,8 @@ bower_components
 .lock-wscript
 build/Release
 node_modules/
+ui/node_modules/
+ui/*.tsbuildinfo
 jspm_packages/
 web_modules/
 *.tsbuildinfo
@@ -84,6 +86,8 @@ web_modules/
 out
 .nuxt
 dist
+!internal/ui/dist
+!internal/ui/dist/**
 .cache/
 .vuepress/dist
 .temp
@@ -123,3 +127,4 @@ go.work.sum
 *scheduled_tasks*
 tmp/
 data/
+dist/

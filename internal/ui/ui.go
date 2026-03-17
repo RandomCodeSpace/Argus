@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"net/http"
 	"strings"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/RandomCodeSpace/otelcontext/internal/vectordb"
 )
 
-//go:embed templates/*.html static/*
+//go:embed templates/*.html static/* dist
 var content embed.FS
 
 type Server struct {
@@ -84,20 +85,25 @@ func (s *Server) SetMCPConfig(enabled bool, path string) {
 func (s *Server) RegisterRoutes(mux *http.ServeMux) error {
 	mux.Handle("/static/", http.FileServer(http.FS(content)))
 
-	mux.HandleFunc("/", s.handleDashboard)
-	mux.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusMovedPermanently)
-	})
-	mux.HandleFunc("/traces", s.handleTraces)
-	mux.HandleFunc("/traces/", s.handleTraceDetail)
-	mux.HandleFunc("/services", s.handleServices)
-	mux.HandleFunc("/mcp-console", s.handleMCPConsole)
-	// Redirect old standalone pages to dashboard
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusMovedPermanently)
-	})
-	mux.HandleFunc("/storage", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/", http.StatusMovedPermanently)
+	// Serve React SPA from dist/ for all non-API paths.
+	// API routes are registered before this is called, so they take priority.
+	distFS, err := fs.Sub(content, "dist")
+	if err != nil {
+		return fmt.Errorf("ui: failed to create dist sub-fs: %w", err)
+	}
+	fileServer := http.FileServer(http.FS(distFS))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Try the file as-is; if not found, fall back to index.html (SPA routing).
+		f, openErr := distFS.Open(strings.TrimPrefix(r.URL.Path, "/"))
+		if openErr == nil {
+			f.Close()
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		// SPA fallback — let the React router handle the path.
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/"
+		fileServer.ServeHTTP(w, r2)
 	})
 
 	return nil
@@ -192,7 +198,6 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
 func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 	nodes := s.topo.GetNodes()
 
@@ -215,5 +220,3 @@ func (s *Server) handleMCPConsole(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
-
-
