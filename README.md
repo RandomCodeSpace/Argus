@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/RandomCodeSpace/otelcontext)](https://github.com/RandomCodeSpace/otelcontext/releases)
 [![Beta](https://img.shields.io/github/v/release/RandomCodeSpace/otelcontext?include_prereleases&label=beta)](https://github.com/RandomCodeSpace/otelcontext/releases)
 ![Go Version](https://img.shields.io/github/go-mod/go-version/RandomCodeSpace/otelcontext)
-![React](https://img.shields.io/badge/frontend-React%20v18-61dafb?logo=react)
+[![Frontend Version](https://img.shields.io/badge/frontend-none-lightgrey)](https://github.com/RandomCodeSpace/otelcontext)
 
 OtelContext is an integrated observability and AI analysis platform.
 
