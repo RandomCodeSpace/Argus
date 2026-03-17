@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  security-events: write
+  id-token: write
+  actions: read
+
+jobs:
+  pipeline:
+    uses: RandomCodeSpace/central-ops/.github/workflows/reusable-pipeline.yml@main
+    secrets: inherit
+    with:
+      go_version_file: go.mod
+      cgo_enabled: "1"
+      go_test_flags: "-race -timeout 120s"
