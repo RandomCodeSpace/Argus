@@ -1,5 +1,4 @@
 import type { Trace } from '@/types/api'
-import JsonViewer from '@/components/shared/JsonViewer'
 
 interface Props {
   traces: Trace[]
@@ -7,9 +6,13 @@ interface Props {
   loading: boolean
   error: string | null
   onSelect: (traceId: string) => void
+  serviceFilter: string | null
+  onClearFilter: () => void
 }
 
-export default function TracesPage({ traces, selected, loading, error, onSelect }: Props) {
+export default function TracesPage({ traces, selected, loading, error, onSelect, serviceFilter, onClearFilter }: Props) {
+  const filtered = serviceFilter ? traces.filter((t) => t.service_name === serviceFilter) : traces
+
   return (
     <div className="traces-layout">
       <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', minHeight: 0, overflow: 'hidden' }}>
@@ -17,10 +20,16 @@ export default function TracesPage({ traces, selected, loading, error, onSelect 
           <div style={{ fontSize: '0.74rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', marginBottom: '0.35rem' }}>Traces</div>
           <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>Recent distributed requests</div>
         </div>
+        {serviceFilter && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, padding: '4px 8px', background: '#1e3a5f', borderRadius: 4, fontSize: 11, color: '#38bdf8' }}>
+            <span>Filtered: {serviceFilter}</span>
+            <button onClick={onClearFilter} style={{ background: 'none', border: 'none', color: '#38bdf8', cursor: 'pointer', fontSize: 12 }}>×</button>
+          </div>
+        )}
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '0.65rem', overflowY: 'auto', overflowX: 'hidden' }}>
           {loading && <div style={{ color: 'var(--text-muted)' }}>Loading traces…</div>}
           {error && <div style={{ color: '#ef4444' }}>{error}</div>}
-          {traces.map((trace) => (
+          {filtered.map((trace) => (
             <button key={trace.trace_id} onClick={() => onSelect(trace.trace_id)} className="card" style={{ textAlign: 'left', background: selected?.trace_id === trace.trace_id ? 'var(--nav-active-bg)' : 'var(--bg-card)', borderColor: selected?.trace_id === trace.trace_id ? 'var(--color-accent)' : 'var(--border)', padding: '0.9rem', cursor: 'pointer' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.35rem' }}>
                 <div style={{ fontWeight: 700, fontSize: '0.78rem' }}>{trace.service_name}</div>
@@ -62,7 +71,6 @@ export default function TracesPage({ traces, selected, loading, error, onSelect 
             ))}
           </div>
         </div>
-        <JsonViewer title="Selected trace JSON" value={selected ?? {}} />
       </div>
     </div>
   )

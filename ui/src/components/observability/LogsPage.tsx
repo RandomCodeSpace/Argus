@@ -7,15 +7,24 @@ interface Props {
   loading: boolean
   error: string | null
   onSimilar: (query: string) => void
+  serviceFilter: string | null
+  onClearFilter: () => void
 }
 
-export default function LogsPage({ logs, similar, loading, error, onSimilar }: Props) {
+export default function LogsPage({ logs, similar, loading, error, onSimilar, serviceFilter, onClearFilter }: Props) {
   const [query, setQuery] = useState('')
   const [severity, setSeverity] = useState('')
 
   const filtered = useMemo(() => {
-    return logs.filter((log) => (severity ? log.severity === severity : true))
-  }, [logs, severity])
+    let result = logs
+    if (serviceFilter) {
+      result = result.filter((log) => log.service_name === serviceFilter)
+    }
+    if (severity) {
+      result = result.filter((log) => log.severity === severity)
+    }
+    return result
+  }, [logs, severity, serviceFilter])
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 420px) minmax(0, 1fr)', gap: '1rem', minHeight: 0, flex: 1 }}>
@@ -24,6 +33,12 @@ export default function LogsPage({ logs, similar, loading, error, onSimilar }: P
           <div style={{ fontSize: '0.74rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', marginBottom: '0.35rem' }}>Live Log Search</div>
           <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>Tail, filter, and query similar incidents</div>
         </div>
+        {serviceFilter && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, padding: '4px 8px', background: '#1e3a5f', borderRadius: 4, fontSize: 11, color: '#38bdf8' }}>
+            <span>Filtered: {serviceFilter}</span>
+            <button onClick={onClearFilter} style={{ background: 'none', border: 'none', color: '#38bdf8', cursor: 'pointer', fontSize: 12 }}>×</button>
+          </div>
+        )}
         <input className="search-input" style={{ paddingLeft: '10px' }} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find similar logs..." spellCheck={false} />
         <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
           {['', 'INFO', 'WARN', 'ERROR'].map((value) => (
@@ -60,7 +75,6 @@ export default function LogsPage({ logs, similar, loading, error, onSimilar }: P
                 <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>{new Date(log.timestamp).toLocaleTimeString()}</span>
               </div>
               <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>{log.body}</div>
-              {log.ai_insight && <div style={{ marginTop: '0.45rem', fontSize: '0.7rem', color: 'var(--color-accent)' }}>{log.ai_insight}</div>}
             </div>
           ))}
         </div>

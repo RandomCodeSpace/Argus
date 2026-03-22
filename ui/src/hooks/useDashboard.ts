@@ -1,34 +1,35 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { DashboardStats, RepoStats } from '@/types/api'
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { DashboardStats, RepoStats } from '../types/api';
 
-export function useDashboard() {
-  const [dashboard, setDashboard] = useState<DashboardStats | null>(null)
-  const [stats, setStats] = useState<RepoStats | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+export function useDashboard(pollInterval = 30_000) {
+  const [dashboard, setDashboard] = useState<DashboardStats | null>(null);
+  const [stats, setStats] = useState<RepoStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
     try {
-      const [dashboardRes, statsRes] = await Promise.all([
+      const [dRes, sRes] = await Promise.all([
         fetch('/api/metrics/dashboard'),
         fetch('/api/stats'),
-      ])
-      const [dashboardData, statsData] = await Promise.all([
-        dashboardRes.json(),
-        statsRes.json(),
-      ])
-      setDashboard(dashboardData)
-      setStats(statsData)
-    } catch (e) {
-      setError(String(e))
+      ]);
+      if (!dRes.ok || !sRes.ok) throw new Error('fetch failed');
+      setDashboard(await dRes.json());
+      setStats(await sRes.json());
+      setError(null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'fetch failed');
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }, [])
+  }, []);
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    load();
+    timerRef.current = setInterval(load, pollInterval);
+    return () => clearInterval(timerRef.current);
+  }, [load, pollInterval]);
 
-  return { dashboard, stats, loading, error, reload: load }
+  return { dashboard, stats, loading, error, reload: load };
 }

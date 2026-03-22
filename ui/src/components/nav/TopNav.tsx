@@ -1,50 +1,76 @@
-import { Activity, Database, LayoutDashboard, Moon, Radar, Search, Sun, Workflow } from 'lucide-react'
-import type { DashboardStats } from '@/types/api'
-import { fmt } from '@/lib/utils'
+import { Moon, Network, Radar, Search, Sun, Terminal } from 'lucide-react'
+import type { DashboardStats, RepoStats } from '../../types/api'
+import { fmt } from '../../lib/utils'
+import { useTheme } from '../../hooks/useTheme'
 
-export type OtelView = 'overview' | 'traces' | 'logs' | 'services' | 'metrics' | 'archive' | 'mcp'
+export type OtelView = 'services' | 'traces' | 'logs' | 'mcp'
 
-interface Props {
-  currentView: OtelView
-  onViewChange: (view: OtelView) => void
-  stats: DashboardStats | null
-  onThemeToggle: () => void
+interface TopNavProps {
+  view: OtelView
+  onNavigate: (view: OtelView) => void
+  dashboard: DashboardStats | null
+  stats: RepoStats | null
+  wsConnected: boolean
 }
 
-const items: { view: OtelView; label: string; icon: typeof Activity }[] = [
-  { view: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { view: 'traces', label: 'Traces', icon: Activity },
-  { view: 'logs', label: 'Logs', icon: Search },
-  { view: 'services', label: 'Services', icon: Radar },
-  { view: 'metrics', label: 'Metrics', icon: Database },
-  { view: 'archive', label: 'Archive', icon: Database },
-  { view: 'mcp', label: 'MCP Console', icon: Workflow },
+const navItems: { key: OtelView; label: string; icon: typeof Network }[] = [
+  { key: 'services', label: 'Service Map', icon: Network },
+  { key: 'traces', label: 'Traces', icon: Search },
+  { key: 'logs', label: 'Logs', icon: Radar },
+  { key: 'mcp', label: 'MCP', icon: Terminal },
 ]
 
-export default function TopNav({ currentView, onViewChange, stats, onThemeToggle }: Props) {
+export default function TopNav({ view, onNavigate, dashboard, stats, wsConnected }: TopNavProps) {
+  const { theme, toggle } = useTheme()
+
   return (
     <nav className="top-nav">
       <a className="logo" href="/">
-        <Activity size={17} style={{ color: 'var(--color-accent)', flexShrink: 0 }} />
-        <span className="logo-mark">OTELCONTEXT</span>
-        <span className="logo-ver">observability mesh</span>
+        <span style={{ color: 'var(--color-accent)', fontSize: '1rem', flexShrink: 0 }}>&#9670;</span>
+        <span className="logo-mark">OtelContext</span>
       </a>
 
-      {items.map(({ view, label, icon: Icon }) => (
-        <button key={view} className={`nav-link${currentView === view ? ' active' : ''}`} onClick={() => onViewChange(view)}>
+      {navItems.map(({ key, label, icon: Icon }) => (
+        <button
+          key={key}
+          className={`nav-link${view === key ? ' active' : ''}`}
+          onClick={() => onNavigate(key)}
+        >
           <Icon size={13} /> {label}
         </button>
       ))}
 
-      <div className="stats" style={{ marginLeft: 'auto' }}>
-        <div className="stat"><span className="stat-val">{fmt(stats?.total_traces ?? 0)}</span><span className="stat-lbl">Traces</span></div>
-        <div className="stat"><span className="stat-val">{fmt(stats?.total_logs ?? 0)}</span><span className="stat-lbl">Logs</span></div>
-        <div className="stat"><span className="stat-val">{fmt(stats?.active_services ?? 0)}</span><span className="stat-lbl">Services</span></div>
+      <div className="stats-bar" style={{ marginLeft: 'auto' }}>
+        <span>
+          Services{' '}
+          <b className="stat-healthy">{dashboard?.active_services ?? '--'}</b>
+        </span>
+        <span>
+          Traces{' '}
+          <b>{fmt(dashboard?.total_traces ?? 0)}</b>
+        </span>
+        <span>
+          Logs{' '}
+          <b>{fmt(dashboard?.total_logs ?? 0)}</b>
+        </span>
+        <span>
+          Error Rate{' '}
+          <b className={(dashboard?.error_rate ?? 0) > 5 ? 'stat-error' : ''}>
+            {dashboard?.error_rate != null ? `${dashboard.error_rate.toFixed(1)}%` : '--%'}
+          </b>
+        </span>
+        <span>
+          DB{' '}
+          <b>{stats?.db_size_mb != null ? `${stats.db_size_mb}MB` : '--'}</b>
+        </span>
+        <span
+          className={`ws-dot ${wsConnected ? 'connected' : 'disconnected'}`}
+          title={wsConnected ? 'WebSocket connected' : 'WebSocket disconnected'}
+        />
       </div>
 
-      <button className="theme-btn" onClick={onThemeToggle} title="Toggle theme" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Sun size={15} className="icon-sun" />
-        <Moon size={15} className="icon-moon" />
+      <button className="theme-btn" onClick={toggle} title="Toggle theme">
+        {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
       </button>
     </nav>
   )

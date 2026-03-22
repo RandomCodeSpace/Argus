@@ -51,7 +51,6 @@ export interface LogEntry {
   body: string
   service_name: string
   attributes_json: string
-  ai_insight?: string
   timestamp: string
 }
 
@@ -68,49 +67,6 @@ export interface LogsResponse {
   total?: number
   limit?: number
   offset?: number
-}
-
-export interface MetricBucket {
-  id: number
-  name: string
-  service_name: string
-  time_bucket: string
-  min: number
-  max: number
-  sum: number
-  count: number
-  attributes_json: string
-}
-
-export interface TrafficPoint {
-  timestamp: string
-  count: number
-  error_count: number
-}
-
-export interface LatencyPoint {
-  timestamp: string
-  duration_us: number
-}
-
-export interface ServiceMapNode {
-  name: string
-  total_traces: number
-  error_count: number
-  avg_latency_ms: number
-}
-
-export interface ServiceMapEdge {
-  source: string
-  target: string
-  call_count: number
-  avg_latency_ms: number
-  error_rate: number
-}
-
-export interface ServiceMapMetrics {
-  nodes: ServiceMapNode[]
-  edges: ServiceMapEdge[]
 }
 
 export interface SystemNode {
@@ -158,6 +114,7 @@ export interface RepoStats {
   traceCount?: number
   serviceCount?: number
   errorCount?: number
+  db_size_mb?: number
   [key: string]: unknown
 }
 

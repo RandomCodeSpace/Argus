@@ -1,27 +1,32 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { SystemGraphResponse } from '@/types/api'
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { SystemGraphResponse } from '../types/api';
 
-export function useSystemGraph() {
-  const [graph, setGraph] = useState<SystemGraphResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [cache, setCache] = useState('MISS')
+export function useSystemGraph(pollInterval = 60_000) {
+  const [graph, setGraph] = useState<SystemGraphResponse | null>(null);
+  const [cache, setCache] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
     try {
-      const res = await fetch('/api/system/graph')
-      setCache(res.headers.get('X-Cache') ?? 'MISS')
-      setGraph(await res.json())
-    } catch (e) {
-      setError(String(e))
+      const res = await fetch('/api/system/graph');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setCache(res.headers.get('X-Cache') ?? '');
+      setGraph(await res.json());
+      setError(null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'fetch failed');
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }, [])
+  }, []);
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    load();
+    timerRef.current = setInterval(load, pollInterval);
+    return () => clearInterval(timerRef.current);
+  }, [load, pollInterval]);
 
-  return { graph, cache, loading, error, reload: load }
+  return { graph, cache, loading, error, reload: load };
 }

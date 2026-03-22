@@ -264,3 +264,88 @@ code {
   min-height: 0;
   overflow: hidden;
 }
+
+.stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+}
+.stats-bar b { color: var(--text-primary); }
+.stats-bar .stat-error { color: #ef4444; }
+.stats-bar .stat-healthy { color: #22c55e; }
+.ws-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.ws-dot.connected { background: #22c55e; }
+.ws-dot.disconnected { background: #ef4444; }
+
+/* ── Service Map ──────────────────────────────────────────────────── */
+.service-map-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+.service-map-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.service-map-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.service-map-canvas {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+.edge-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.edge-slider input[type="range"] {
+  width: 120px;
+  accent-color: var(--color-accent);
+}
+.zoom-controls {
+  display: flex;
+  gap: 4px;
+}
+.zoom-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+.zoom-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+.side-panel {
+  width: 280px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-card);
+  overflow-y: auto;
+  padding: 12px;
+  flex-shrink: 0;
+}
