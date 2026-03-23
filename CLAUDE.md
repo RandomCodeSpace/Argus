@@ -2,8 +2,8 @@
 
 ## Project Overview
 
-OtelContext is a self-hosted OTLP observability platform. Single Go binary with embedded React frontend.
-- **Backend:** Go 1.25, native `net/http` (no frameworks), GORM ORM, gRPC + HTTP for OTLP ingestion
+OtelContext is a self-hosted OTLP observability platform. Single JAR with embedded React frontend.
+- **Backend:** Java 21 (Spring Boot 3.x), Spring Data JPA (Hibernate), gRPC + HTTP for OTLP ingestion
 - **Frontend:** React 19 + TypeScript + Mantine UI v8 + ECharts + ReactFlow
 - **Ports:** gRPC `:4317` (OTLP), HTTP `:8080` (API + HTTP OTLP + WebSocket + UI)
 

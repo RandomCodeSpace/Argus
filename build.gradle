@@ -1,0 +1,89 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.4.4'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.otelcontext'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    grpcVersion = '1.69.0'
+    protobufVersion = '4.29.3'
+    otlpVersion = '1.5.0-alpha'
+}
+
+dependencies {
+    // Spring Boot
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-websocket'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // H2 Database (embedded, PostgreSQL mode)
+    runtimeOnly 'com.h2database:h2'
+
+    // Micrometer Prometheus
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+
+    // gRPC
+    implementation "io.grpc:grpc-netty-shaded:${grpcVersion}"
+    implementation "io.grpc:grpc-protobuf:${grpcVersion}"
+    implementation "io.grpc:grpc-stub:${grpcVersion}"
+    implementation "io.grpc:grpc-services:${grpcVersion}"
+
+    // OTLP Proto definitions
+    implementation "io.opentelemetry.proto:opentelemetry-proto:${otlpVersion}"
+
+    // Protobuf
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+    implementation "com.google.protobuf:protobuf-java-util:${protobufVersion}"
+
+    // Compression (aircompressor - pure Java zstd)
+    implementation 'io.airlift:aircompressor:2.0.2'
+
+    // Jackson for JSON
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+
+    // Jakarta annotation (for @Generated)
+    implementation 'jakarta.annotation:jakarta.annotation-api'
+
+    // Test
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    jvmArgs '--enable-preview'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ['--enable-preview']
+}
+
+bootJar {
+    archiveFileName = 'otelcontext.jar'
+}
+
+// Copy UI dist to static resources for serving
+tasks.register('copyUiDist', Copy) {
+    from 'ui/dist' // pre-built React UI if exists
+    into 'src/main/resources/static'
+    onlyIf { file('ui/dist').exists() }
+}
+
+tasks.named('processResources') {
+    dependsOn 'copyUiDist'
+}

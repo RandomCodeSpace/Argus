@@ -1,0 +1,68 @@
+server:
+  port: ${HTTP_PORT:8080}
+
+spring:
+  application:
+    name: otelcontext
+  datasource:
+    url: jdbc:h2:file:./data/otelcontext;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        jdbc:
+          batch_size: 500
+        order_inserts: true
+        order_updates: true
+  h2:
+    console:
+      enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info
+  endpoint:
+    health:
+      show-details: always
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+logging:
+  level:
+    root: ${LOG_LEVEL:INFO}
+    com.otelcontext: ${LOG_LEVEL:INFO}
+
+# OtelContext custom configuration
+otelcontext:
+  grpc-port: ${GRPC_PORT:4317}
+  env: ${APP_ENV:development}
+  hot-retention-days: ${HOT_RETENTION_DAYS:7}
+  cold-storage-path: ${COLD_STORAGE_PATH:./data/cold}
+  cold-storage-max-gb: ${COLD_STORAGE_MAX_GB:50}
+  archive-schedule-hour: ${ARCHIVE_SCHEDULE_HOUR:2}
+  archive-batch-size: ${ARCHIVE_BATCH_SIZE:10000}
+  sampling-rate: ${SAMPLING_RATE:1.0}
+  sampling-always-on-errors: ${SAMPLING_ALWAYS_ON_ERRORS:true}
+  sampling-latency-threshold-ms: ${SAMPLING_LATENCY_THRESHOLD_MS:500}
+  metric-max-cardinality: ${METRIC_MAX_CARDINALITY:10000}
+  api-rate-limit-rps: ${API_RATE_LIMIT_RPS:100}
+  mcp-enabled: ${MCP_ENABLED:true}
+  mcp-path: ${MCP_PATH:/mcp}
+  vector-index-max-entries: ${VECTOR_INDEX_MAX_ENTRIES:100000}
+  dlq-path: ${DLQ_PATH:./data/dlq}
+  dlq-max-files: ${DLQ_MAX_FILES:1000}
+  dlq-max-disk-mb: ${DLQ_MAX_DISK_MB:500}
+  dlq-max-retries: ${DLQ_MAX_RETRIES:10}
+  dlq-replay-interval: ${DLQ_REPLAY_INTERVAL:5m}
+  tsdb-window-seconds: ${TSDB_WINDOW_SECONDS:30}
+  tsdb-ring-slots: ${TSDB_RING_SLOTS:120}
