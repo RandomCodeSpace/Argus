@@ -253,7 +253,14 @@ const ServiceMap: React.FC<ServiceMapProps> = ({
       series: [
         {
           type: 'graph',
-          layout: 'none',
+          layout: 'force',
+          force: {
+            repulsion: dense ? 200 : 350,
+            gravity: 0.08,
+            edgeLength: dense ? [80, 160] : [120, 250],
+            friction: 0.6,
+            layoutAnimation: true,
+          },
           roam: true,
           data: seriesData,
           links: seriesLinks,
