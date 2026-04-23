@@ -665,6 +665,30 @@ func main() {
 		}
 	}()
 
+	// DB pool stats sampler (Task 7 — visibility for DB_MAX_OPEN_CONNS sizing).
+	// sql.DB.Stats() is cheap (atomic loads on the pool struct), so 5s is fine.
+	bootWG.Add(1)
+	go func() {
+		defer bootWG.Done()
+		sqlDB, err := repo.DB().DB()
+		if err != nil || sqlDB == nil {
+			slog.Warn("DB pool sampler disabled (cannot get *sql.DB)", "error", err)
+			return
+		}
+		// Initial sample so the gauge has a value immediately after startup.
+		metrics.SampleDBPoolStats(sqlDB)
+		tick := time.NewTicker(5 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-appCtx.Done():
+				return
+			case <-tick.C:
+				metrics.SampleDBPoolStats(sqlDB)
+			}
+		}
+	}()
+
 	// Panic recovery: OUTERMOST middleware below OTel tracing — ensures any
 	// panic in downstream middleware or handlers is logged + metered and the
 	// process survives.

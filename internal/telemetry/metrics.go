@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"runtime"
@@ -69,6 +70,13 @@ type Metrics struct {
 
 	// --- GraphRAG overflow ---
 	GraphRAGEventsDroppedTotal *prometheus.CounterVec
+
+	// --- DB pool (sampled every 5s from sql.DB.Stats) ---
+	DBPoolOpenConnections prometheus.Gauge
+	DBPoolInUse           prometheus.Gauge
+	DBPoolIdle            prometheus.Gauge
+	DBPoolWaitCount       prometheus.Gauge
+	DBPoolWaitDuration    prometheus.Gauge // cumulative seconds
 
 	// Atomic counters for JSON health endpoint (avoids scraping Prometheus)
 	totalIngested  atomic.Int64
@@ -246,6 +254,28 @@ func New() *Metrics {
 			Name: "otelcontext_graphrag_events_dropped_total",
 			Help: "Events dropped because the GraphRAG event channel was full.",
 		}, []string{"signal"}),
+
+		// DB pool (Task 7 — visibility for DB_MAX_OPEN_CONNS sizing).
+		DBPoolOpenConnections: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_open_connections",
+			Help: "Current number of open DB connections in the pool.",
+		}),
+		DBPoolInUse: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_in_use",
+			Help: "Current number of DB connections in use.",
+		}),
+		DBPoolIdle: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_idle",
+			Help: "Current number of idle DB connections.",
+		}),
+		DBPoolWaitCount: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_wait_count",
+			Help: "Cumulative connection waits since DB open (gauge-reported; compute rate() over this value).",
+		}),
+		DBPoolWaitDuration: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_wait_duration_seconds",
+			Help: "Cumulative wait duration for pool acquisition, in seconds (gauge-reported; compute rate() over this value).",
+		}),
 	}
 	return m
 }
@@ -262,6 +292,24 @@ func (m *Metrics) StartRuntimeMetrics() {
 			m.GoHeapAllocBytes.Set(float64(ms.HeapAlloc))
 		}
 	}()
+}
+
+// SampleDBPoolStats writes the live pool stats into the DBPool* gauges. Safe
+// to call from a ticker goroutine. A nil receiver or a nil *sql.DB is a no-op
+// so callers don't need to guard at every call site.
+//
+// WaitCount and WaitDuration from sql.DBStats are cumulative values (always
+// monotonically increasing) — operators should compute rate() over them.
+func (m *Metrics) SampleDBPoolStats(sqlDB *sql.DB) {
+	if m == nil || sqlDB == nil {
+		return
+	}
+	s := sqlDB.Stats()
+	m.DBPoolOpenConnections.Set(float64(s.OpenConnections))
+	m.DBPoolInUse.Set(float64(s.InUse))
+	m.DBPoolIdle.Set(float64(s.Idle))
+	m.DBPoolWaitCount.Set(float64(s.WaitCount))
+	m.DBPoolWaitDuration.Set(s.WaitDuration.Seconds())
 }
 
 // --- Existing helper methods ---
