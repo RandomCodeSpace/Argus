@@ -104,6 +104,15 @@ type GraphRAG struct {
 	// metrics is an optional Prometheus hook for exporting event drops.
 	// Assigned via SetMetrics; nil-safe at call sites.
 	metrics *telemetry.Metrics
+
+	// invCooldown suppresses repeat PersistInvestigation calls for the same
+	// (trigger_service, root_service, root_operation) inside a sliding window.
+	// Initialized in New; pruned from the refresh tick.
+	invCooldown *investigationCooldown
+
+	// invInserts counts cooldown-allowed PersistInvestigation calls.
+	// Incremented BEFORE the DB write — see InvestigationInsertCount.
+	invInserts atomic.Int64
 }
 
 // SetMetrics wires the Prometheus registry so GraphRAG event drops are
@@ -124,6 +133,13 @@ func (g *GraphRAG) DroppedLogsCount() int64 { return g.droppedLogs.Load() }
 // DroppedMetricsCount reports the number of metric events dropped
 // because the ingestion channel was full.
 func (g *GraphRAG) DroppedMetricsCount() int64 { return g.droppedMetrics.Load() }
+
+// InvestigationInsertCount reports cooldown-allowed PersistInvestigation
+// calls. Semantics: this counter increments when the cooldown check
+// passes, BEFORE the DB write — so a subsequent DB failure still
+// increments this. It is NOT a strict DB insert count. Intended for
+// tests to assert cooldown behavior without requiring a live repo.
+func (g *GraphRAG) InvestigationInsertCount() int64 { return g.invInserts.Load() }
 
 // recordEventDrop increments the per-signal atomic counter and — when
 // a telemetry registry is wired — the Prometheus counter vec.
@@ -201,6 +217,7 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 		snapshotEvery: cfg.SnapshotEvery,
 		anomalyEvery:  cfg.AnomalyEvery,
 		workerCount:   cfg.WorkerCount,
+		invCooldown:   newInvestigationCooldown(5 * time.Minute),
 	}
 
 	// Restore persisted Drain templates so log clustering survives restarts.

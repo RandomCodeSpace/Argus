@@ -27,6 +27,11 @@ func (g *GraphRAG) refreshLoop(ctx context.Context) {
 				slog.Debug("GraphRAG pruned expired traces/spans", "count", pruned)
 			}
 			g.pruneOldAnomalies()
+			// Bound the investigation cooldown map. 2× window keeps
+			// entries through the active suppression plus a grace period.
+			if g.invCooldown != nil {
+				g.invCooldown.prune(time.Now().Add(-10 * time.Minute))
+			}
 		}
 	}
 }
