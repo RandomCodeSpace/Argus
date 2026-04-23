@@ -27,6 +27,11 @@ func (g *GraphRAG) refreshLoop(ctx context.Context) {
 				slog.Debug("GraphRAG pruned expired traces/spans", "count", pruned)
 			}
 			g.pruneOldAnomalies()
+			// Bound the investigation cooldown map. 2× window keeps
+			// entries through the active suppression plus a grace period.
+			if g.invCooldown != nil {
+				g.invCooldown.prune(time.Now().Add(-10 * time.Minute))
+			}
 		}
 	}
 }
@@ -86,7 +91,7 @@ func (g *GraphRAG) rebuildFromDB() {
 	var rows []spanRow
 	err := g.repo.DB().
 		Table("spans").
-		Select("span_id, parent_span_id, service_name, operation_name, duration, trace_id, start_time").
+		Select("span_id, parent_span_id, service_name, operation_name, duration, trace_id, status, start_time").
 		Where("start_time > ?", since).
 		Order("start_time ASC").
 		Limit(50000).

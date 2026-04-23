@@ -92,6 +92,12 @@ DB_DSN="host=my-server.postgres.database.azure.com user=my-mi@tenant.onmicrosoft
 - `API_RATE_LIMIT_RPS=100`
 - `VECTOR_INDEX_MAX_ENTRIES=100000`
 - `SAMPLING_*` (defaults keep 100% + always-on errors)
+- `GRAPHRAG_WORKER_COUNT=4`, `GRAPHRAG_EVENT_QUEUE_SIZE=10000` — raise worker count at 100+ services if you see `graphrag_events_dropped_total` climbing
+- `GRPC_MAX_RECV_MB=16`, `GRPC_MAX_CONCURRENT_STREAMS=1000` — OTLP gRPC server caps
+- `RETENTION_BATCH_SIZE=50000`, `RETENTION_BATCH_SLEEP_MS=1` — purge pacing; raise the sleep for busy production DBs
+
+### SQLite in production
+SQLite is rejected at startup when `APP_ENV=production` unless you explicitly opt in with `OTELCONTEXT_ALLOW_SQLITE_PROD=true`. The guard exists because SQLite uses a single writer lock — fine for < ~10 services at low QPS, miserable at scale. Prefer Postgres for anything resembling production.
 
 ---
 
@@ -190,6 +196,11 @@ Grep structured logs for `acquire entra token`. Common causes: expired managed-i
   - `OtelContext_retention_consecutive_failures > 3`
   - `rate(OtelContext_otlp_payload_rejected_total[5m]) > 0`
   - `rate(OtelContext_dlq_replay_failure_total[5m]) > rate(OtelContext_dlq_replay_success_total[5m])`
+  - `rate(otelcontext_graphrag_events_dropped_total[5m]) > 0` — ingestion channel saturated; bump `GRAPHRAG_WORKER_COUNT` or `GRAPHRAG_EVENT_QUEUE_SIZE`
+  - `otelcontext_retention_rows_behind > 1_000_000` — purge is falling behind; tune `RETENTION_BATCH_SIZE` / `RETENTION_BATCH_SLEEP_MS`
+  - `otelcontext_db_pool_in_use / otelcontext_db_pool_max_open > 0.9` — pool exhausted; raise `DB_MAX_OPEN_CONNS`
+  - `rate(otelcontext_dlq_evicted_total[5m]) > 0` — DLQ is actively dropping entries at cap; replay target is down or slow
+  - `rate(otelcontext_dashboard_p99_row_cap_hits_total[1h]) > 0` on SQLite — dataset exceeds the 200k in-memory cap; migrate to Postgres for accurate p99
 - **Log levels:** `LOG_LEVEL=DEBUG` for deep diagnostics, default `INFO`. `WARN` or `ERROR` is too quiet for a running system; avoid in prod.
 
 ---
@@ -201,6 +212,40 @@ Grep structured logs for `acquire entra token`. Common causes: expired managed-i
 - **No built-in TLS cert rotation** beyond `TLS_AUTO_SELFSIGNED` regenerating on expiry. For managed certs, re-mount and restart on rotation.
 - **GraphRAG is in-memory.** The topology is rebuilt from the DB on boot. Very large corpora (millions of services/operations) will extend boot time.
 - **Cold archive is not part of the current build.** Historical data beyond `HOT_RETENTION_DAYS` is deleted, not archived. If you need long-term retention, extend `HOT_RETENTION_DAYS` or export via a downstream pipeline.
+
+---
+
+## Scale & Load Testing
+
+The backend is sized for **100–200 services** emitting OTLP at commodity rates. A programmatic load simulator ships with the repo to verify this.
+
+### Running the simulator
+
+```bash
+make loadtest-build       # produces bin/loadsim
+./bin/loadsim             # 200 producers × 50 spans/sec × 60s against localhost:4317
+./bin/loadsim --help      # flags: --endpoint, --services, --rate, --duration, --tenant-id, --warmup
+```
+
+The binary is under the `loadtest` build tag — `go build ./...` and `go test ./...` ignore it. `make loadtest` runs a full 60s sweep against `localhost:4317`.
+
+### What healthy looks like
+
+During a 60s / 200-service run against a warm instance on Postgres:
+
+- Ingestion: no `otlp_payload_rejected_total` samples, no `graphrag_events_dropped_total` samples.
+- DB pool: `db_pool_in_use / db_pool_max_open` stays below ~0.8.
+- Retention: `retention_rows_behind` stays within one hourly tick of steady state.
+- DLQ: zero activity (`dlq_evicted_total`, `dlq_replay_failure_total` unchanged).
+- The dashboard p99 gauge updates without hitting the SQLite row cap.
+
+If any of those trip, use the corresponding metric alert from the Observability section above as the entry point.
+
+### When to re-run
+
+- Before cutting a release that touches the ingestion path or GraphRAG.
+- After tuning any of: `GRAPHRAG_WORKER_COUNT`, `GRPC_MAX_CONCURRENT_STREAMS`, `RETENTION_BATCH_SIZE`, `DB_MAX_OPEN_CONNS`.
+- When scaling the deployment past the current-tested envelope (e.g., 500+ services) — expand the simulator's `--services` flag to match.
 
 ---
 

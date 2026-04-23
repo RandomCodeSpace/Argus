@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"runtime"
@@ -11,6 +12,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// Metric naming convention: historical metrics use the PascalCase
+// `OtelContext_*` prefix; all metrics added during the backend-robustness
+// initiative (and later) use the Prometheus-idiomatic lowercase
+// `otelcontext_*` prefix. Both are kept for backward compatibility —
+// operators querying by prefix should match `(?i)^otelcontext_`. Migrate
+// the legacy names when a major version bump is acceptable.
 
 // Metrics holds all internal Prometheus metrics for OtelContext self-monitoring.
 type Metrics struct {
@@ -52,6 +60,7 @@ type Metrics struct {
 	RetentionRowsPurgedTotal       *prometheus.CounterVec
 	RetentionPurgeDurationSeconds  *prometheus.HistogramVec
 	RetentionVacuumDurationSeconds *prometheus.HistogramVec
+	RetentionRowsBehindGauge       *prometheus.GaugeVec
 
 	// --- Runtime ---
 	GoGoroutines     prometheus.Gauge
@@ -65,6 +74,23 @@ type Metrics struct {
 	RetentionLastSuccessTimestamp *prometheus.GaugeVec
 	RetentionConsecutiveFailures  *prometheus.GaugeVec
 	DBUp                          *prometheus.GaugeVec
+
+	// --- GraphRAG overflow ---
+	GraphRAGEventsDroppedTotal *prometheus.CounterVec
+
+	// --- DB pool (sampled every 5s from sql.DB.Stats) ---
+	DBPoolOpenConnections prometheus.Gauge
+	DBPoolInUse           prometheus.Gauge
+	DBPoolIdle            prometheus.Gauge
+	DBPoolWaitCount       prometheus.Gauge
+	DBPoolWaitDuration    prometheus.Gauge // cumulative seconds
+
+	// --- DLQ eviction (Task 8) ---
+	DLQEvictedTotal      prometheus.Counter
+	DLQEvictedBytesTotal prometheus.Counter
+
+	// --- Dashboard p99 (Task 10) ---
+	DashboardP99RowCapHitsTotal prometheus.Counter
 
 	// Atomic counters for JSON health endpoint (avoids scraping Prometheus)
 	totalIngested  atomic.Int64
@@ -193,6 +219,10 @@ func New() *Metrics {
 			Help:    "Duration of per-table retention maintenance (VACUUM/ANALYZE/OPTIMIZE), by driver and table.",
 			Buckets: prometheus.ExponentialBuckets(0.01, 2, 16),
 		}, []string{"driver", "table"}),
+		RetentionRowsBehindGauge: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "otelcontext_retention_rows_behind",
+			Help: "Rows older than retention cutoff that have not yet been purged. Climbing means purge cannot keep pace with ingest.",
+		}, []string{"table", "driver"}),
 
 		// Runtime
 		GoGoroutines: promauto.NewGauge(prometheus.GaugeOpts{
@@ -233,7 +263,46 @@ func New() *Metrics {
 			Name: "OtelContext_db_up",
 			Help: "Database reachability (1=up, 0=down) by driver.",
 		}, []string{"driver"}),
+
+		GraphRAGEventsDroppedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "otelcontext_graphrag_events_dropped_total",
+			Help: "Events dropped because the GraphRAG event channel was full.",
+		}, []string{"signal"}),
+
+		// DB pool (Task 7 — visibility for DB_MAX_OPEN_CONNS sizing).
+		DBPoolOpenConnections: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_open_connections",
+			Help: "Current number of open DB connections in the pool.",
+		}),
+		DBPoolInUse: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_in_use",
+			Help: "Current number of DB connections in use.",
+		}),
+		DBPoolIdle: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_idle",
+			Help: "Current number of idle DB connections.",
+		}),
+		DBPoolWaitCount: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_wait_count",
+			Help: "Cumulative connection waits since DB open (gauge-reported; compute rate() over this value).",
+		}),
+		DBPoolWaitDuration: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_db_pool_wait_duration_seconds",
+			Help: "Cumulative wait duration for pool acquisition, in seconds (gauge-reported; compute rate() over this value).",
+		}),
 	}
+	m.DLQEvictedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "otelcontext_dlq_evicted_total",
+		Help: "DLQ files evicted to stay under MaxFiles/MaxDiskMB. Non-zero means backlog exceeds cap — investigate DB health.",
+	})
+	m.DLQEvictedBytesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "otelcontext_dlq_evicted_bytes_total",
+		Help: "Total bytes evicted from DLQ. Rate indicates data-loss volume during backlog.",
+	})
+	m.DashboardP99RowCapHitsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "otelcontext_dashboard_p99_row_cap_hits_total",
+		Help: "Number of dashboard p99 computations that hit the SQLite row cap (200k). Indicates the dataset is too large for in-memory p99 — use Postgres for prod.",
+	})
 	return m
 }
 
@@ -249,6 +318,24 @@ func (m *Metrics) StartRuntimeMetrics() {
 			m.GoHeapAllocBytes.Set(float64(ms.HeapAlloc))
 		}
 	}()
+}
+
+// SampleDBPoolStats writes the live pool stats into the DBPool* gauges. Safe
+// to call from a ticker goroutine. A nil receiver or a nil *sql.DB is a no-op
+// so callers don't need to guard at every call site.
+//
+// WaitCount and WaitDuration from sql.DBStats are cumulative values (always
+// monotonically increasing) — operators should compute rate() over them.
+func (m *Metrics) SampleDBPoolStats(sqlDB *sql.DB) {
+	if m == nil || sqlDB == nil {
+		return
+	}
+	s := sqlDB.Stats()
+	m.DBPoolOpenConnections.Set(float64(s.OpenConnections))
+	m.DBPoolInUse.Set(float64(s.InUse))
+	m.DBPoolIdle.Set(float64(s.Idle))
+	m.DBPoolWaitCount.Set(float64(s.WaitCount))
+	m.DBPoolWaitDuration.Set(s.WaitDuration.Seconds())
 }
 
 // --- Existing helper methods ---

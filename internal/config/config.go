@@ -33,6 +33,12 @@ type Config struct {
 	// Retention
 	HotRetentionDays int
 
+	// Retention tuning. Defaults (batch=50000, sleep=1ms) work for Postgres at
+	// 100k logs/sec sustained. Lower on resource-constrained hosts; raise on
+	// dedicated DB machines. 0/negative values use defaults.
+	RetentionBatchSize    int
+	RetentionBatchSleepMs int
+
 	// TSDB
 	TSDBRingBufferDuration string // e.g. "1h"
 
@@ -62,6 +68,13 @@ type Config struct {
 
 	// Vector Index
 	VectorIndexMaxEntries int
+
+	// GraphRAG worker count (background consumers of the ingestion event channel).
+	// Defaults to 4 if unset or <=0. Increase under sustained high ingest.
+	GraphRAGWorkerCount int
+
+	// GraphRAG event channel buffer size. Defaults to 10000 if unset or <=0.
+	GraphRAGEventQueueSize int
 
 	// TLS (HTTP + gRPC). When both paths are set, TLS is enabled on both servers.
 	// Empty values (default) keep plaintext behavior.
@@ -105,6 +118,15 @@ type Config struct {
 	// DevMode disables origin checks for WebSocket and enables dev-friendly defaults.
 	// Derived from APP_ENV == "development".
 	DevMode bool
+
+	// gRPC server tuning — protects against huge OTLP batches and connection abuse.
+	GRPCMaxRecvMB            int
+	GRPCMaxConcurrentStreams int
+
+	// AllowSqliteProd lets operators explicitly acknowledge that SQLite is
+	// being used outside dev/test. Without it, a production Env + SQLite
+	// combination refuses to start.
+	AllowSqliteProd bool
 }
 
 func Load(customPath string) (*Config, error) {
@@ -145,7 +167,9 @@ func Load(customPath string) (*Config, error) {
 		DBConnMaxLifetime: getEnv("DB_CONN_MAX_LIFETIME", "1h"),
 
 		// Retention
-		HotRetentionDays: getEnvInt("HOT_RETENTION_DAYS", 7),
+		HotRetentionDays:      getEnvInt("HOT_RETENTION_DAYS", 7),
+		RetentionBatchSize:    getEnvInt("RETENTION_BATCH_SIZE", 50000),
+		RetentionBatchSleepMs: getEnvInt("RETENTION_BATCH_SLEEP_MS", 1),
 
 		// TSDB
 		TSDBRingBufferDuration: getEnv("TSDB_RING_BUFFER_DURATION", "1h"),
@@ -177,6 +201,10 @@ func Load(customPath string) (*Config, error) {
 		// Vector
 		VectorIndexMaxEntries: getEnvInt("VECTOR_INDEX_MAX_ENTRIES", 100000),
 
+		// GraphRAG
+		GraphRAGWorkerCount:    getEnvInt("GRAPHRAG_WORKER_COUNT", 4),
+		GraphRAGEventQueueSize: getEnvInt("GRAPHRAG_EVENT_QUEUE_SIZE", 10000),
+
 		// TLS
 		TLSCertFile:       getEnv("TLS_CERT_FILE", ""),
 		TLSKeyFile:        getEnv("TLS_KEY_FILE", ""),
@@ -193,6 +221,13 @@ func Load(customPath string) (*Config, error) {
 		DefaultTenant:           getEnv("DEFAULT_TENANT", "default"),
 		OTLPTrustResourceTenant: parseTruthy(getEnv("OTLP_TRUST_RESOURCE_TENANT", "")),
 		APITenantKeysFile:       getEnv("API_TENANT_KEYS_FILE", ""),
+
+		// gRPC server tuning
+		GRPCMaxRecvMB:            getEnvInt("GRPC_MAX_RECV_MB", 16),
+		GRPCMaxConcurrentStreams: getEnvInt("GRPC_MAX_CONCURRENT_STREAMS", 1000),
+
+		// Production safety guard for SQLite
+		AllowSqliteProd: parseTruthy(getEnv("OTELCONTEXT_ALLOW_SQLITE_PROD", "")),
 	}, nil
 }
 
@@ -270,6 +305,12 @@ func (c *Config) Validate() error {
 	if c.HotRetentionDays < 1 || c.HotRetentionDays > 36500 {
 		return fmt.Errorf("HOT_RETENTION_DAYS must be between 1 and 36500, got %d", c.HotRetentionDays)
 	}
+	if c.RetentionBatchSize < 1 || c.RetentionBatchSize > 10_000_000 {
+		return fmt.Errorf("RETENTION_BATCH_SIZE must be between 1 and 10000000, got %d", c.RetentionBatchSize)
+	}
+	if c.RetentionBatchSleepMs < 0 || c.RetentionBatchSleepMs > 60_000 {
+		return fmt.Errorf("RETENTION_BATCH_SLEEP_MS must be between 0 and 60000, got %d", c.RetentionBatchSleepMs)
+	}
 	if c.MetricMaxCardinality < 0 {
 		return fmt.Errorf("METRIC_MAX_CARDINALITY must be >= 0, got %d", c.MetricMaxCardinality)
 	}
@@ -278,6 +319,17 @@ func (c *Config) Validate() error {
 	}
 	if c.APIRateLimitRPS < 0 {
 		return fmt.Errorf("API_RATE_LIMIT_RPS must be >= 0, got %d", c.APIRateLimitRPS)
+	}
+	// gRPC receive cap: must be positive, and capped to prevent per-message OOM
+	// from a bad env value (the limit pre-allocates a buffer of this size on
+	// the first large message). 256 MiB is far beyond any legitimate OTLP batch
+	// and still small enough that a 200-connection flood cannot exhaust a host
+	// with typical RAM.
+	if c.GRPCMaxRecvMB < 1 || c.GRPCMaxRecvMB > 256 {
+		return fmt.Errorf("GRPC_MAX_RECV_MB must be between 1 and 256, got %d", c.GRPCMaxRecvMB)
+	}
+	if c.GRPCMaxConcurrentStreams < 1 || c.GRPCMaxConcurrentStreams > 1_000_000 {
+		return fmt.Errorf("GRPC_MAX_CONCURRENT_STREAMS must be between 1 and 1000000, got %d", c.GRPCMaxConcurrentStreams)
 	}
 	if c.DBMaxOpenConns < 1 {
 		return fmt.Errorf("DB_MAX_OPEN_CONNS must be >= 1, got %d", c.DBMaxOpenConns)
@@ -351,4 +403,22 @@ func checkReadable(path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// ValidateDBForEnv refuses the combination of SQLite driver + production
+// environment unless AllowSqliteProd is explicitly set. SQLite's single-writer
+// lock caps sustained throughput to ~5 services; using it in production will
+// silently throttle ingestion.
+//
+// Call once during startup after Load + Validate.
+func (c *Config) ValidateDBForEnv() error {
+	if !strings.EqualFold(c.DBDriver, "sqlite") {
+		return nil
+	}
+	if strings.EqualFold(c.Env, "production") && !c.AllowSqliteProd {
+		return fmt.Errorf("SQLite is unsuitable for APP_ENV=production " +
+			"(single-writer lock caps throughput at ~5 services). " +
+			"Use DB_DRIVER=postgres, or set OTELCONTEXT_ALLOW_SQLITE_PROD=true to acknowledge")
+	}
+	return nil
 }

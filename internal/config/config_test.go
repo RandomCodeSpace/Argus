@@ -21,6 +21,10 @@ func baseValid() *Config {
 		DBMaxOpenConns:       50,
 		DBMaxIdleConns:       10,
 		CompressionLevel:     "default",
+		GRPCMaxRecvMB:            16,
+		GRPCMaxConcurrentStreams: 1000,
+		RetentionBatchSize:    50000,
+		RetentionBatchSleepMs: 1,
 	}
 }
 
@@ -247,6 +251,45 @@ func TestTLSAutoSelfsigned_IgnoredWhenCertFilesSet(t *testing.T) {
 	}
 	if !c.TLSEnabled() {
 		t.Error("TLSEnabled should be true in cert-file mode")
+	}
+}
+
+func TestValidateDBForEnv_RefusesSQLiteInProduction(t *testing.T) {
+	c := baseValid()
+	c.DBDriver = "sqlite"
+	c.Env = "production"
+	c.AllowSqliteProd = false
+	err := c.ValidateDBForEnv()
+	if err == nil || !strings.Contains(err.Error(), "SQLite is unsuitable") {
+		t.Fatalf("expected SQLite-in-prod rejection, got %v", err)
+	}
+}
+
+func TestValidateDBForEnv_AllowsSQLiteWhenOptIn(t *testing.T) {
+	c := baseValid()
+	c.DBDriver = "sqlite"
+	c.Env = "production"
+	c.AllowSqliteProd = true
+	if err := c.ValidateDBForEnv(); err != nil {
+		t.Fatalf("opt-in should allow SQLite in prod, got %v", err)
+	}
+}
+
+func TestValidateDBForEnv_AllowsSQLiteInDev(t *testing.T) {
+	c := baseValid()
+	c.DBDriver = "sqlite"
+	c.Env = "development"
+	if err := c.ValidateDBForEnv(); err != nil {
+		t.Fatalf("SQLite in dev must pass, got %v", err)
+	}
+}
+
+func TestValidateDBForEnv_AllowsPostgresInProd(t *testing.T) {
+	c := baseValid()
+	c.DBDriver = "postgres"
+	c.Env = "production"
+	if err := c.ValidateDBForEnv(); err != nil {
+		t.Fatalf("Postgres in prod must pass, got %v", err)
 	}
 }
 

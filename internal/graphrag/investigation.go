@@ -4,10 +4,52 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+// investigationCooldown suppresses repeated PersistInvestigation calls with
+// the same (trigger_service, root_service, root_operation) inside a sliding
+// window. Without this, a single stuck service produces one insert every
+// anomaly tick (default 10s) indefinitely.
+type investigationCooldown struct {
+	mu       sync.Mutex
+	lastSeen map[string]time.Time
+	window   time.Duration
+}
+
+func newInvestigationCooldown(window time.Duration) *investigationCooldown {
+	return &investigationCooldown{
+		lastSeen: map[string]time.Time{},
+		window:   window,
+	}
+}
+
+// allow returns true when the key has not been seen within the sliding
+// window. On allow, it records now as the new last-seen timestamp.
+func (c *investigationCooldown) allow(key string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if t, ok := c.lastSeen[key]; ok && now.Sub(t) < c.window {
+		return false
+	}
+	c.lastSeen[key] = now
+	return true
+}
+
+// prune drops entries older than cutoff to bound map size. Called from
+// the refresh tick.
+func (c *investigationCooldown) prune(cutoff time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, t := range c.lastSeen {
+		if t.Before(cutoff) {
+			delete(c.lastSeen, k)
+		}
+	}
+}
 
 // Investigation is a persisted record of an automated error investigation.
 type Investigation struct {
@@ -48,6 +90,18 @@ func (g *GraphRAG) PersistInvestigation(triggerService string, chains []ErrorCha
 	if firstChain.RootCause == nil {
 		return
 	}
+
+	// Cooldown: suppress repeat investigations for the same
+	// (trigger_service, root_service, root_operation) inside a sliding window.
+	// Without this guard, a stuck service produces one insert every anomaly
+	// tick (default 10s) indefinitely.
+	key := triggerService + "|" + firstChain.RootCause.Service + "|" + firstChain.RootCause.Operation
+	if g.invCooldown != nil && !g.invCooldown.allow(key, time.Now()) {
+		return
+	}
+	// Increment BEFORE db.Create so the counter reflects "cooldown allowed;
+	// persist attempted". See InvestigationInsertCount's doc comment.
+	g.invInserts.Add(1)
 
 	id := fmt.Sprintf("inv_%d", time.Now().UnixNano())
 
@@ -122,6 +176,10 @@ func (g *GraphRAG) PersistInvestigation(triggerService string, chains []ErrorCha
 		SpanChain:        spanJSON,
 	}
 
+	if g.repo == nil || g.repo.DB() == nil {
+		// No repo (e.g., test harness): cooldown still applied; skip DB write.
+		return
+	}
 	if err := g.repo.DB().Create(&inv).Error; err != nil {
 		slog.Error("Failed to persist investigation", "error", err)
 		return

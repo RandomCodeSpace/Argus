@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/RandomCodeSpace/otelcontext/internal/telemetry"
 )
 
 // DeadLetterQueue provides disk-based resilience for failed database writes.
@@ -36,6 +39,11 @@ type DeadLetterQueue struct {
 	onSuccess   func()
 	onFailure   func()
 	onDiskBytes func(int64)
+
+	// Eviction observability (Task 8)
+	evicted      atomic.Int64
+	evictedBytes atomic.Int64
+	metricsTel   *telemetry.Metrics // nil-safe; enables otelcontext_dlq_evicted_* counters
 }
 
 // NewDLQ creates a new Dead Letter Queue.
@@ -79,6 +87,19 @@ func (d *DeadLetterQueue) SetMetrics(onEnqueue, onSuccess, onFailure func(), onD
 	d.onDiskBytes = onDiskBytes
 	d.mu.Unlock()
 }
+
+// SetTelemetryMetrics wires the Prometheus registry so eviction counts surface
+// in telemetry. Safe to call with a nil *telemetry.Metrics (disables the hook).
+func (d *DeadLetterQueue) SetTelemetryMetrics(m *telemetry.Metrics) {
+	d.metricsTel = m
+}
+
+// EvictedCount reports the cumulative number of DLQ files dropped due to
+// MaxFiles/MaxDiskMB caps. Exposed for tests; see otelcontext_dlq_evicted_total.
+func (d *DeadLetterQueue) EvictedCount() int64 { return d.evicted.Load() }
+
+// EvictedBytesCount reports the byte volume dropped alongside EvictedCount.
+func (d *DeadLetterQueue) EvictedBytesCount() int64 { return d.evictedBytes.Load() }
 
 // DiskBytes returns the current total bytes of files in the DLQ directory.
 func (d *DeadLetterQueue) DiskBytes() int64 {
@@ -180,6 +201,8 @@ func (d *DeadLetterQueue) enforceLimits(incomingBytes int64) {
 	}
 
 	maxBytes := d.maxDiskMB * 1024 * 1024
+	var evictedThisCall int
+	var evictedBytesThisCall int64
 	i := 0
 	for i < len(files) {
 		overFiles := d.maxFiles > 0 && len(files)-i >= d.maxFiles
@@ -195,7 +218,28 @@ func (d *DeadLetterQueue) enforceLimits(incomingBytes int64) {
 		_ = os.Remove(path)
 		delete(d.retries, files[i].name)
 		slog.Warn("🗑️  DLQ FIFO eviction", "file", files[i].name)
+		d.evicted.Add(1)
+		d.evictedBytes.Add(files[i].size)
+		evictedThisCall++
+		evictedBytesThisCall += files[i].size
+		if d.metricsTel != nil {
+			if d.metricsTel.DLQEvictedTotal != nil {
+				d.metricsTel.DLQEvictedTotal.Inc()
+			}
+			if d.metricsTel.DLQEvictedBytesTotal != nil {
+				d.metricsTel.DLQEvictedBytesTotal.Add(float64(files[i].size))
+			}
+		}
 		i++
+	}
+
+	if evictedThisCall > 0 {
+		slog.Warn("dlq: evicted oldest files to stay under cap",
+			"files", evictedThisCall,
+			"bytes", evictedBytesThisCall,
+			"max_files", d.maxFiles,
+			"max_disk_mb", d.maxDiskMB,
+		)
 	}
 }
 

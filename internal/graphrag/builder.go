@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
@@ -91,6 +92,69 @@ type GraphRAG struct {
 	refreshEvery  time.Duration
 	snapshotEvery time.Duration
 	anomalyEvery  time.Duration
+	workerCount   int // 0 = defaultWorkerCount (set by New from Config)
+
+	// Event drop counters. Atomic so OnSpanIngested/OnLogIngested/
+	// OnMetricIngested can record overflows without taking any lock —
+	// the channel-full path must stay hot-path cheap.
+	droppedSpans   atomic.Int64
+	droppedLogs    atomic.Int64
+	droppedMetrics atomic.Int64
+
+	// metrics is an optional Prometheus hook for exporting event drops.
+	// Assigned via SetMetrics; nil-safe at call sites.
+	metrics *telemetry.Metrics
+
+	// invCooldown suppresses repeat PersistInvestigation calls for the same
+	// (trigger_service, root_service, root_operation) inside a sliding window.
+	// Initialized in New; pruned from the refresh tick.
+	invCooldown *investigationCooldown
+
+	// invInserts counts cooldown-allowed PersistInvestigation calls.
+	// Incremented BEFORE the DB write — see InvestigationInsertCount.
+	invInserts atomic.Int64
+}
+
+// SetMetrics wires the Prometheus registry so GraphRAG event drops are
+// observable via otelcontext_graphrag_events_dropped_total. Safe to call
+// before Start; pass nil to disable Prometheus recording (atomic
+// counters still tick).
+func (g *GraphRAG) SetMetrics(m *telemetry.Metrics) { g.metrics = m }
+
+// DroppedSpansCount reports the number of span events dropped because
+// the ingestion channel was full. Exported for tests and readiness
+// probes; atomic, safe from any goroutine.
+func (g *GraphRAG) DroppedSpansCount() int64 { return g.droppedSpans.Load() }
+
+// DroppedLogsCount reports the number of log events dropped because
+// the ingestion channel was full.
+func (g *GraphRAG) DroppedLogsCount() int64 { return g.droppedLogs.Load() }
+
+// DroppedMetricsCount reports the number of metric events dropped
+// because the ingestion channel was full.
+func (g *GraphRAG) DroppedMetricsCount() int64 { return g.droppedMetrics.Load() }
+
+// InvestigationInsertCount reports cooldown-allowed PersistInvestigation
+// calls. Semantics: this counter increments when the cooldown check
+// passes, BEFORE the DB write — so a subsequent DB failure still
+// increments this. It is NOT a strict DB insert count. Intended for
+// tests to assert cooldown behavior without requiring a live repo.
+func (g *GraphRAG) InvestigationInsertCount() int64 { return g.invInserts.Load() }
+
+// recordEventDrop increments the per-signal atomic counter and — when
+// a telemetry registry is wired — the Prometheus counter vec.
+func (g *GraphRAG) recordEventDrop(signal string) {
+	switch signal {
+	case "span":
+		g.droppedSpans.Add(1)
+	case "log":
+		g.droppedLogs.Add(1)
+	case "metric":
+		g.droppedMetrics.Add(1)
+	}
+	if g.metrics != nil && g.metrics.GraphRAGEventsDroppedTotal != nil {
+		g.metrics.GraphRAGEventsDroppedTotal.WithLabelValues(signal).Inc()
+	}
 }
 
 // Config holds GraphRAG configuration.
@@ -152,6 +216,8 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 		refreshEvery:  cfg.RefreshEvery,
 		snapshotEvery: cfg.SnapshotEvery,
 		anomalyEvery:  cfg.AnomalyEvery,
+		workerCount:   cfg.WorkerCount,
+		invCooldown:   newInvestigationCooldown(5 * time.Minute),
 	}
 
 	// Restore persisted Drain templates so log clustering survives restarts.
@@ -173,8 +239,14 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 // Each goroutine is wrapped in a panic recovery so one misbehaving event
 // can't take down the whole subsystem.
 func (g *GraphRAG) Start(ctx context.Context) {
-	// Start event workers
-	for i := 0; i < defaultWorkerCount; i++ {
+	// Start event workers. Honor the configured worker count so operators
+	// can scale up under sustained high ingest; fall back to the package
+	// default when the constructor wasn't handed an override.
+	workers := g.workerCount
+	if workers <= 0 {
+		workers = defaultWorkerCount
+	}
+	for i := 0; i < workers; i++ {
 		go func() {
 			defer guardWorker("eventWorker")
 			g.eventWorker(ctx)
@@ -196,7 +268,7 @@ func (g *GraphRAG) Start(ctx context.Context) {
 	}()
 
 	slog.Info("GraphRAG started",
-		"workers", defaultWorkerCount,
+		"workers", workers,
 		"trace_ttl", g.traceTTL,
 		"refresh_every", g.refreshEvery,
 	)
@@ -240,14 +312,19 @@ func (g *GraphRAG) IsRunning() bool {
 
 // OnSpanIngested is the callback wired into the trace ingestion pipeline.
 func (g *GraphRAG) OnSpanIngested(span storage.Span) {
+	status := span.Status
+	if status == "" {
+		status = "STATUS_CODE_UNSET"
+	}
 	select {
 	case g.eventCh <- event{span: &spanEvent{
 		Span:    span,
 		TraceID: span.TraceID,
-		Status:  "OK",
+		Status:  status,
 	}}:
 	default:
-		// Channel full — graph is best-effort; DB is source of truth
+		// Channel full — graph is best-effort; DB is source of truth.
+		g.recordEventDrop("span")
 	}
 }
 
@@ -256,6 +333,8 @@ func (g *GraphRAG) OnLogIngested(log storage.Log) {
 	select {
 	case g.eventCh <- event{log: &logEvent{Log: log}}:
 	default:
+		// Channel full — graph is best-effort; DB is source of truth.
+		g.recordEventDrop("log")
 	}
 }
 
@@ -264,6 +343,8 @@ func (g *GraphRAG) OnMetricIngested(metric tsdb.RawMetric) {
 	select {
 	case g.eventCh <- event{metric: &metricEvent{Metric: metric}}:
 	default:
+		// Channel full — graph is best-effort; DB is source of truth.
+		g.recordEventDrop("metric")
 	}
 }
 

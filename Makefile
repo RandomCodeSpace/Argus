@@ -1,4 +1,4 @@
-.PHONY: build test vet check setup-hooks ui-install ui-build dev-ui
+.PHONY: build test vet check setup-hooks ui-install ui-build dev-ui loadtest loadtest-build
 
 ui-install:
 	cd ui && npm install
@@ -20,6 +20,13 @@ check: build vet test
 
 dev-ui:
 	cd ui && npm run dev
+
+loadtest-build:
+	CGO_ENABLED=0 go build -tags loadtest -o bin/loadsim ./test/loadsim
+
+loadtest: loadtest-build
+	@echo "Running 200-service load simulator (60s) against localhost:4317..."
+	./bin/loadsim
 
 ## setup-hooks installs the pre-commit hook into .git/hooks
 setup-hooks:

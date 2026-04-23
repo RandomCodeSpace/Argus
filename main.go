@@ -49,6 +49,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip" // Register gzip decompressor
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 )
@@ -134,6 +135,13 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		fatal("invalid configuration", err)
 	}
+	if err := cfg.ValidateDBForEnv(); err != nil {
+		fatal("DB/Env validation", err)
+	}
+	if strings.EqualFold(cfg.DBDriver, "sqlite") {
+		slog.Warn("SQLite driver in use — suitable for dev/small deployments only. " +
+			"Expected cap: ~5 services, ~1k events/sec sustained.")
+	}
 
 	// Initialize structured logger
 	var level slog.Level
@@ -181,7 +189,12 @@ func main() {
 
 	// 2a. Retention scheduler: hourly batched purge + daily VACUUM/ANALYZE.
 	ctxRetention, cancelRetention := context.WithCancel(context.Background())
-	retention := storage.NewRetentionScheduler(repo, cfg.HotRetentionDays)
+	retention := storage.NewRetentionScheduler(
+		repo,
+		cfg.HotRetentionDays,
+		cfg.RetentionBatchSize,
+		time.Duration(cfg.RetentionBatchSleepMs)*time.Millisecond,
+	)
 	retention.Start(ctxRetention)
 	slog.Info("🧹 Retention scheduler started", "retention_days", cfg.HotRetentionDays)
 
@@ -243,6 +256,7 @@ func main() {
 		func() { metrics.DLQReplayFailure.Inc() },
 		func(b int64) { metrics.DLQDiskBytes.Set(float64(b)) },
 	)
+	dlq.SetTelemetryMetrics(metrics)
 	slog.Info("🔁 DLQ initialized", "path", cfg.DLQPath, "interval", replayInterval)
 
 	// 4. Initialize Real-Time WebSocket Hub
@@ -336,10 +350,17 @@ func main() {
 
 	// 4g. Initialize GraphRAG (replaces simple graph for advanced queries)
 	graphrag.SetPanicMetrics(metrics)
-	graphRAG := graphrag.New(repo, vectorIdx, tsdbAgg, ringBuf, graphrag.DefaultConfig())
+	graphRAGCfg := graphrag.DefaultConfig()
+	graphRAGCfg.WorkerCount = cfg.GraphRAGWorkerCount
+	graphRAGCfg.ChannelSize = cfg.GraphRAGEventQueueSize
+	graphRAG := graphrag.New(repo, vectorIdx, tsdbAgg, ringBuf, graphRAGCfg)
+	graphRAG.SetMetrics(metrics)
 	ctxGraphRAG, cancelGraphRAG := context.WithCancel(context.Background())
 	go graphRAG.Start(ctxGraphRAG)
-	slog.Info("GraphRAG started (layered graph with anomaly detection)")
+	slog.Info("GraphRAG started (layered graph with anomaly detection)",
+		"workers", cfg.GraphRAGWorkerCount,
+		"event_queue_size", cfg.GraphRAGEventQueueSize,
+	)
 
 	// Auto-migrate GraphRAG models (Investigation, GraphSnapshot)
 	if err := graphrag.AutoMigrateGraphRAG(repo.DB()); err != nil {
@@ -460,13 +481,39 @@ func main() {
 	if err != nil {
 		fatal("Failed to listen on gRPC port", err, "port", cfg.GRPCPort)
 	}
+	recvBytes := cfg.GRPCMaxRecvMB
+	if recvBytes <= 0 {
+		recvBytes = 16
+	}
+	streams := cfg.GRPCMaxConcurrentStreams
+	if streams <= 0 {
+		streams = 1000
+	}
+
 	grpcOpts := []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(recvBytes * 1024 * 1024),
+		grpc.MaxConcurrentStreams(uint32(streams)),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:                  60 * time.Second, // ping idle clients
+			Timeout:               10 * time.Second, // drop if no pong
+			MaxConnectionIdle:     10 * time.Minute, // garbage-collect dead NAT entries
+			MaxConnectionAge:      2 * time.Hour,    // force periodic reconnects
+			MaxConnectionAgeGrace: 30 * time.Second,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
+		}),
 		// Recovery FIRST so a panic inside the metrics interceptor is still caught.
 		grpc.ChainUnaryInterceptor(
 			recoveryUnaryInterceptor(metrics),
 			metricsUnaryInterceptor(metrics),
 		),
 	}
+	slog.Info("📡 gRPC server tuned",
+		"max_recv_mb", recvBytes,
+		"max_concurrent_streams", streams,
+	)
 	switch tlsMode {
 	case "cert-file":
 		creds, err := credentials.NewServerTLSFromFile(tlsCertPath, tlsKeyPath)
@@ -561,8 +608,34 @@ func main() {
 	httpHandler = api.MetricsMiddleware(metrics, httpHandler)
 	if cfg.APIRateLimitRPS > 0 {
 		rl := api.NewRateLimiter(float64(cfg.APIRateLimitRPS))
-		httpHandler = rl.Middleware(httpHandler)
-		slog.Info("🛡️  API rate limiter enabled", "rps_per_ip", cfg.APIRateLimitRPS)
+		// OTLP ingestion paths (/v1/*) are exempt from the per-IP rate limiter.
+		//
+		// Why: OTLP collectors batch aggressively and a healthy agent routinely
+		// exceeds the API_RATE_LIMIT_RPS default (100 RPS/IP). Throttling the
+		// ingestion path drops legitimate telemetry — the exact data this
+		// platform exists to capture — so /v1/* bypasses the limiter.
+		//
+		// DoS trade-off (acknowledged): the APIKeyGate runs *downstream* of the
+		// limiter in the middleware chain, which means an unauthenticated
+		// attacker can push /v1/* requests past the (bypassed) limiter all the
+		// way to the auth check before getting a 401. This is acceptable
+		// because APIKeyGate is header-only: it inspects the Authorization
+		// header and returns 401 without parsing the request body, so the
+		// per-request CPU cost is bounded and small (no protobuf decode, no
+		// JSON parse, no DB touch). Layer-4/7 protections (firewall, LB,
+		// WAF, mTLS) remain the primary defense against volumetric abuse.
+		//
+		// TODO: if this trade-off becomes a concern (e.g. abuse observed in
+		// prod, or CPU pressure from 401 storms), add a separate
+		// higher-ceiling OTLP-specific limiter scoped to /v1/* — tuned for
+		// collector-class RPS — rather than lowering the general API limit.
+		httpHandler = rl.MiddlewareExcept(func(path string) bool {
+			return strings.HasPrefix(path, "/v1/")
+		})(httpHandler)
+		slog.Info("🛡️  API rate limiter enabled",
+			"rps_per_ip", cfg.APIRateLimitRPS,
+			"exempt_prefixes", []string{"/v1/"},
+		)
 	}
 
 	// DB health fast-fail gate: returns 503 for DB-dependent paths when the
@@ -589,6 +662,30 @@ func main() {
 				return
 			case <-tick.C:
 				metrics.GraphRAGEventBufferDepth.Set(float64(graphRAG.EventBufferDepth()))
+			}
+		}
+	}()
+
+	// DB pool stats sampler (Task 7 — visibility for DB_MAX_OPEN_CONNS sizing).
+	// sql.DB.Stats() is cheap (atomic loads on the pool struct), so 5s is fine.
+	bootWG.Add(1)
+	go func() {
+		defer bootWG.Done()
+		sqlDB, err := repo.DB().DB()
+		if err != nil || sqlDB == nil {
+			slog.Warn("DB pool sampler disabled (cannot get *sql.DB)", "error", err)
+			return
+		}
+		// Initial sample so the gauge has a value immediately after startup.
+		metrics.SampleDBPoolStats(sqlDB)
+		tick := time.NewTicker(5 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-appCtx.Done():
+				return
+			case <-tick.C:
+				metrics.SampleDBPoolStats(sqlDB)
 			}
 		}
 	}()
