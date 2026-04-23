@@ -153,18 +153,31 @@ func (r *RetentionScheduler) runPurge(ctx context.Context) {
 	}
 	results := make(chan result, 3)
 
-	go func() {
-		n, err := r.repo.PurgeLogsBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
-		results <- result{"logs", n, err}
-	}()
-	go func() {
-		n, err := r.repo.PurgeTracesBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
-		results <- result{"traces", n, err}
-	}()
-	go func() {
-		n, err := r.repo.PurgeMetricBucketsBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
-		results <- result{"metric_buckets", n, err}
-	}()
+	// runGuarded wraps each purge goroutine so a panic still sends on the
+	// results channel. Without this, a panic inside a repo method would leave
+	// the main loop blocked on `<-results`, and the outer `running` guard
+	// would keep every subsequent tick from firing.
+	runGuarded := func(kind string, fn func() (int64, error)) {
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("retention: purge panic", "kind", kind, "panic", rec)
+					results <- result{kind, 0, fmt.Errorf("%s purge panic: %v", kind, rec)}
+				}
+			}()
+			n, err := fn()
+			results <- result{kind, n, err}
+		}()
+	}
+	runGuarded("logs", func() (int64, error) {
+		return r.repo.PurgeLogsBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
+	})
+	runGuarded("traces", func() (int64, error) {
+		return r.repo.PurgeTracesBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
+	})
+	runGuarded("metric_buckets", func() (int64, error) {
+		return r.repo.PurgeMetricBucketsBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
+	})
 
 	purgeFailed := false
 	totals := map[string]int64{}
