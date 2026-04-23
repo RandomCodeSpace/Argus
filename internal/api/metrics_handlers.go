@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/RandomCodeSpace/otelcontext/internal/api/views"
 )
 
 // handleGetTrafficMetrics handles GET /api/metrics/traffic
@@ -26,7 +28,7 @@ func (s *Server) handleGetTrafficMetrics(w http.ResponseWriter, r *http.Request)
 
 	serviceNames := r.URL.Query()["service_name"]
 
-	points, err := s.repo.GetTrafficMetrics(start, end, serviceNames)
+	points, err := s.repo.GetTrafficMetrics(r.Context(), start, end, serviceNames)
 	if err != nil {
 		slog.Error("Failed to get traffic metrics", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -34,7 +36,7 @@ func (s *Server) handleGetTrafficMetrics(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(points)
+	_ = json.NewEncoder(w).Encode(points)
 }
 
 // handleGetLatencyHeatmap handles GET /api/metrics/latency_heatmap
@@ -55,7 +57,7 @@ func (s *Server) handleGetLatencyHeatmap(w http.ResponseWriter, r *http.Request)
 
 	serviceNames := r.URL.Query()["service_name"]
 
-	points, err := s.repo.GetLatencyHeatmap(start, end, serviceNames)
+	points, err := s.repo.GetLatencyHeatmap(r.Context(), start, end, serviceNames)
 	if err != nil {
 		slog.Error("Failed to get latency heatmap", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -63,7 +65,7 @@ func (s *Server) handleGetLatencyHeatmap(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(points)
+	_ = json.NewEncoder(w).Encode(points)
 }
 
 // handleGetDashboardStats handles GET /api/metrics/dashboard
@@ -85,7 +87,7 @@ func (s *Server) handleGetDashboardStats(w http.ResponseWriter, r *http.Request)
 
 	serviceNames := r.URL.Query()["service_name"]
 
-	stats, err := s.repo.GetDashboardStats(start, end, serviceNames)
+	stats, err := s.repo.GetDashboardStats(r.Context(), start, end, serviceNames)
 	if err != nil {
 		slog.Error("Failed to get dashboard stats", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -93,7 +95,7 @@ func (s *Server) handleGetDashboardStats(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
+	_ = json.NewEncoder(w).Encode(views.DashboardStatsFromModel(stats))
 }
 
 // handleGetServiceMapMetrics handles GET /api/metrics/service-map
@@ -112,7 +114,7 @@ func (s *Server) handleGetServiceMapMetrics(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	metrics, err := s.repo.GetServiceMapMetrics(start, end)
+	metrics, err := s.repo.GetServiceMapMetrics(r.Context(), start, end)
 	if err != nil {
 		slog.Error("Failed to get service map metrics", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -120,7 +122,7 @@ func (s *Server) handleGetServiceMapMetrics(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(metrics)
+	_ = json.NewEncoder(w).Encode(views.ServiceMapMetricsFromModel(metrics))
 }
 
 // handleGetMetricBuckets handles GET /api/metrics
@@ -140,7 +142,7 @@ func (s *Server) handleGetMetricBuckets(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	buckets, err := s.repo.GetMetricBuckets(start, end, serviceName, name)
+	buckets, err := s.repo.GetMetricBuckets(r.Context(), start, end, serviceName, name)
 	if err != nil {
 		slog.Error("Failed to get metric buckets", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -148,14 +150,14 @@ func (s *Server) handleGetMetricBuckets(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(buckets)
+	_ = json.NewEncoder(w).Encode(views.MetricBucketsFromModels(buckets))
 }
 
 // handleGetMetricNames handles GET /api/metadata/metrics
 func (s *Server) handleGetMetricNames(w http.ResponseWriter, r *http.Request) {
 	serviceName := r.URL.Query().Get("service_name")
 
-	names, err := s.repo.GetMetricNames(serviceName)
+	names, err := s.repo.GetMetricNames(r.Context(), serviceName)
 	if err != nil {
 		slog.Error("Failed to get metric names", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -163,16 +165,16 @@ func (s *Server) handleGetMetricNames(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(names)
+	_ = json.NewEncoder(w).Encode(names)
 }
 
 func (s *Server) handleGetServices(w http.ResponseWriter, r *http.Request) {
-	services, err := s.repo.GetServices()
+	services, err := s.repo.GetServices(r.Context())
 	if err != nil {
 		slog.Error("Failed to get services metadata", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(services)
+	_ = json.NewEncoder(w).Encode(services)
 }

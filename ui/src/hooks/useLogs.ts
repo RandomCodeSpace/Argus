@@ -19,7 +19,7 @@ export function useLogs() {
     setError(null)
     try {
       const res = await fetch('/api/logs?limit=100&offset=0')
-      const data = await res.json()
+      const data: LogsResponse | LogEntry[] = await res.json()
       setLogs(normalizeLogs(data))
     } catch (e) {
       setError(String(e))
@@ -33,7 +33,7 @@ export function useLogs() {
   const runSimilar = async (query: string) => {
     if (!query.trim()) return
     const res = await fetch(`/api/logs/similar?q=${encodeURIComponent(query)}&limit=8`)
-    const data = await res.json()
+    const data: LogsResponse | LogEntry[] = await res.json()
     setSimilar(normalizeLogs(data))
   }
 

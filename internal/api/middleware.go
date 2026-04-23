@@ -92,4 +92,3 @@ func isIDSegment(s string) bool {
 	}
 	return len(s) > 0
 }
-

@@ -9,18 +9,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RandomCodeSpace/central-ops/pkg/httputil"
 	"github.com/RandomCodeSpace/otelcontext/internal/graph"
 	"github.com/RandomCodeSpace/otelcontext/internal/graphrag"
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 	"github.com/RandomCodeSpace/otelcontext/internal/telemetry"
 	"github.com/RandomCodeSpace/otelcontext/internal/vectordb"
-	"github.com/RandomCodeSpace/central-ops/pkg/httputil"
 )
 
 const (
 	mcpProtocolVersion = "2024-11-05"
 	serverName         = "OtelContext-mcp"
 	serverVersion      = "1.0.0"
+
+	// mcpTenantHeader is the canonical header MCP clients use to scope tool
+	// invocations to a particular tenant. When absent, queries run under
+	// defaultTenant (injected at construction time).
+	mcpTenantHeader = "X-Tenant-ID"
 )
 
 // Server is the HTTP Streamable MCP server.
@@ -28,11 +33,12 @@ const (
 // GET  /mcp  — SSE stream for real-time notifications
 // OPTIONS /mcp — CORS preflight
 type Server struct {
-	repo      *storage.Repository
-	metrics   *telemetry.Metrics
-	svcGraph  *graph.Graph
-	vectorIdx *vectordb.Index
-	graphRAG  *graphrag.GraphRAG
+	repo          *storage.Repository
+	metrics       *telemetry.Metrics
+	svcGraph      *graph.Graph
+	vectorIdx     *vectordb.Index
+	graphRAG      *graphrag.GraphRAG
+	defaultTenant string
 }
 
 // New creates a new MCP server.
@@ -43,10 +49,19 @@ func New(
 	vectorIdx *vectordb.Index,
 ) *Server {
 	return &Server{
-		repo:      repo,
-		metrics:   metrics,
-		svcGraph:  svcGraph,
-		vectorIdx: vectorIdx,
+		repo:          repo,
+		metrics:       metrics,
+		svcGraph:      svcGraph,
+		vectorIdx:     vectorIdx,
+		defaultTenant: storage.DefaultTenantID,
+	}
+}
+
+// SetDefaultTenant overrides the fallback tenant used when an MCP request
+// carries no X-Tenant-ID header. Call from startup wiring with cfg.DefaultTenant.
+func (s *Server) SetDefaultTenant(t string) {
+	if t != "" {
+		s.defaultTenant = t
 	}
 }
 
@@ -124,7 +139,14 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 			rpcErr = &RPCError{Code: ErrInvalidParams, Message: "invalid tools/call params"}
 			break
 		}
-		result = s.toolHandler(params.Name, params.Arguments)
+		// Resolve tenant from the MCP HTTP transport: header wins, else default.
+		// Downstream tool handlers pull the tenant off ctx via mcpCtx(r.Context()).
+		tenant := strings.TrimSpace(r.Header.Get(mcpTenantHeader))
+		if tenant == "" {
+			tenant = s.defaultTenant
+		}
+		callCtx := storage.WithTenantContext(r.Context(), tenant)
+		result = s.toolHandler(callCtx, params.Name, params.Arguments)
 
 	case "ping":
 		result = map[string]string{"status": "ok", "ts": time.Now().UTC().Format(time.RFC3339)}
@@ -147,7 +169,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp.Result = result
 	}
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleSSE streams server-sent events for real-time MCP subscriptions.
@@ -198,7 +220,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 // writeSSE writes a single SSE event.
 func writeSSE(w http.ResponseWriter, f http.Flusher, event, data string) {
 	data = strings.ReplaceAll(data, "\n", "\ndata: ")
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
 	f.Flush()
 }
 
@@ -210,7 +232,7 @@ func writeError(w http.ResponseWriter, id any, code int, msg string) {
 		ID:      id,
 		Error:   &RPCError{Code: code, Message: msg},
 	}
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // parseToolCallParams flexibly parses the params field of a tools/call request.
@@ -228,4 +250,3 @@ func parseToolCallParams(raw any) (ToolCallParams, bool) {
 	}
 	return p, true
 }
-

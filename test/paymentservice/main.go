@@ -86,7 +86,7 @@ func initOTel() func(context.Context) error {
 
 func main() {
 	shutdown := initOTel()
-	defer shutdown(context.Background())
+	defer func() { _ = shutdown(context.Background()) }()
 
 	tracer = otel.Tracer("payment-service")
 
@@ -114,7 +114,7 @@ func handlePay(w http.ResponseWriter, r *http.Request) {
 
 	// Chaos: 10% chance of Gateway Timeout (HTTP 500)
 	if rand.Intn(100) < 10 {
-		err := fmt.Errorf("Gateway Timeout: Upstream Payment Provider Unreachable")
+		err := fmt.Errorf("gateway timeout: upstream payment provider unreachable")
 		span.RecordError(err)
 		span.SetAttributes(attribute.String("error.type", "payment_gateway_timeout"))
 		span.SetStatus(codes.Error, err.Error())
@@ -145,7 +145,7 @@ func handlePay(w http.ResponseWriter, r *http.Request) {
 	time.Sleep(50 * time.Millisecond) // Simulating payment processing
 	span.AddEvent("payment_approved")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Payment Processed"))
+	_, _ = w.Write([]byte("Payment Processed"))
 }
 
 func callInventoryService(ctx context.Context) error {
@@ -163,7 +163,7 @@ func callInventoryService(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("inventory service returned %d", resp.StatusCode)
@@ -183,7 +183,7 @@ func callAuthService(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("auth service returned %d", resp.StatusCode)

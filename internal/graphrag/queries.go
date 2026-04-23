@@ -212,10 +212,10 @@ func (g *GraphRAG) DependencyChain(traceID string) []SpanNode {
 
 // CorrelatedSignals gathers all related signals for a service within a time range.
 type CorrelatedSignalsResult struct {
-	Service     string           `json:"service"`
-	ErrorLogs   []LogClusterNode `json:"error_logs"`
-	Metrics     []MetricNode     `json:"metrics"`
-	Anomalies   []AnomalyNode    `json:"anomalies"`
+	Service     string             `json:"service"`
+	ErrorLogs   []LogClusterNode   `json:"error_logs"`
+	Metrics     []MetricNode       `json:"metrics"`
+	Anomalies   []AnomalyNode      `json:"anomalies"`
 	ErrorChains []ErrorChainResult `json:"error_chains,omitempty"`
 }
 
@@ -330,10 +330,10 @@ func (g *GraphRAG) AnomalyTimeline(since time.Time) []*AnomalyNode {
 
 // ServiceMap returns the service topology with health scores for the API.
 type ServiceMapEntry struct {
-	Service     *ServiceNode     `json:"service"`
-	Operations  []*OperationNode `json:"operations,omitempty"`
-	CallsTo     []*Edge          `json:"calls_to,omitempty"`
-	CalledBy    []*Edge          `json:"called_by,omitempty"`
+	Service    *ServiceNode     `json:"service"`
+	Operations []*OperationNode `json:"operations,omitempty"`
+	CallsTo    []*Edge          `json:"calls_to,omitempty"`
+	CalledBy   []*Edge          `json:"called_by,omitempty"`
 }
 
 func (g *GraphRAG) ServiceMap(depth int) []ServiceMapEntry {

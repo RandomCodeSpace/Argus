@@ -21,47 +21,123 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/metadata"
 )
 
+// tenantHeader is the canonical HTTP / gRPC metadata key used to override the
+// default tenant on OTLP ingest. Case-insensitive on the wire.
+const tenantHeader = "x-tenant-id"
+
+// tenantFromContext extracts a tenant ID from context or gRPC metadata.
+// Precedence: storage.TenantFromContext (set by HTTP handler / read-side
+// middleware) > gRPC metadata x-tenant-id > "".
+//
+// The storage package owns the single tenant context key — this package reads
+// it via storage.TenantFromContext so write and read paths share identical
+// plumbing and can never drift.
+func tenantFromContext(ctx context.Context) string {
+	if t := storage.TenantFromContext(ctx); t != "" && t != storage.DefaultTenantID {
+		return t
+	}
+	// storage.TenantFromContext coerces missing values to DefaultTenantID, so
+	// a genuine "no value set" is indistinguishable from "explicitly default".
+	// Probe the raw key to tell the two apart before falling back to metadata.
+	if hasStorageTenant(ctx) {
+		return storage.TenantFromContext(ctx)
+	}
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get(tenantHeader); len(vals) > 0 && vals[0] != "" {
+			return vals[0]
+		}
+	}
+	return ""
+}
+
+// hasStorageTenant reports whether the context already carries a tenant value
+// stashed by storage.WithTenantContext. It uses a public probe exported from
+// storage to avoid duplicating the context key type here.
+func hasStorageTenant(ctx context.Context) bool {
+	return storage.HasTenantContext(ctx)
+}
+
+// resolveTenant picks the first non-empty value from
+// (context/metadata, configured default). The OTLP resource attribute
+// "tenant.id" path is gated behind cfg.TrustResourceTenant — disabled by
+// default so a compromised SDK cannot forge another tenant's data.
+func resolveTenant(ctx context.Context, resourceAttrs []*commonpb.KeyValue, fallback string, trustResourceAttr bool) string {
+	if t := tenantFromContext(ctx); t != "" {
+		return t
+	}
+	if trustResourceAttr {
+		if t := tenantFromResource(resourceAttrs); t != "" {
+			return t
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return storage.DefaultTenantID
+}
+
+// tenantFromResource looks for an OTLP resource attribute "tenant.id".
+// Only consulted when cfg.TrustResourceTenant=true (off by default) —
+// see resolveTenant.
+func tenantFromResource(attrs []*commonpb.KeyValue) string {
+	for _, kv := range attrs {
+		if kv.Key == "tenant.id" {
+			return kv.Value.GetStringValue()
+		}
+	}
+	return ""
+}
+
 type TraceServer struct {
-	repo             *storage.Repository
-	metrics          *telemetry.Metrics
-	logCallback      func(storage.Log)
-	spanCallback     func(storage.Span) // called for each span after persistence
-	minSeverity      int
-	allowedServices  map[string]bool
-	excludedServices map[string]bool
-	sampler          *Sampler // nil = no sampling (keep all)
+	repo                *storage.Repository
+	metrics             *telemetry.Metrics
+	logCallback         func(storage.Log)
+	spanCallback        func(storage.Span) // called for each span after persistence
+	minSeverity         int
+	allowedServices     map[string]bool
+	excludedServices    map[string]bool
+	sampler             *Sampler // nil = no sampling (keep all)
+	defaultTenant       string
+	trustResourceTenant bool
 	coltracepb.UnimplementedTraceServiceServer
 }
 
 type LogsServer struct {
-	repo             *storage.Repository
-	metrics          *telemetry.Metrics
-	logCallback      func(storage.Log)
-	minSeverity      int
-	allowedServices  map[string]bool
-	excludedServices map[string]bool
+	repo                *storage.Repository
+	metrics             *telemetry.Metrics
+	logCallback         func(storage.Log)
+	minSeverity         int
+	allowedServices     map[string]bool
+	excludedServices    map[string]bool
+	defaultTenant       string
+	trustResourceTenant bool
 	collogspb.UnimplementedLogsServiceServer
 }
 
 type MetricsServer struct {
-	repo             *storage.Repository
-	metrics          *telemetry.Metrics
-	aggregator       *tsdb.Aggregator
-	metricCallback   func(tsdb.RawMetric)
-	allowedServices  map[string]bool
-	excludedServices map[string]bool
+	repo                *storage.Repository
+	metrics             *telemetry.Metrics
+	aggregator          *tsdb.Aggregator
+	metricCallback      func(tsdb.RawMetric)
+	allowedServices     map[string]bool
+	excludedServices    map[string]bool
+	defaultTenant       string
+	trustResourceTenant bool
 	colmetricspb.UnimplementedMetricsServiceServer
 }
 
 func NewTraceServer(repo *storage.Repository, metrics *telemetry.Metrics, cfg *config.Config) *TraceServer {
 	return &TraceServer{
-		repo:             repo,
-		metrics:          metrics,
-		minSeverity:      parseSeverity(cfg.IngestMinSeverity),
-		allowedServices:  parseServiceList(cfg.IngestAllowedServices),
-		excludedServices: parseServiceList(cfg.IngestExcludedServices),
+		repo:                repo,
+		metrics:             metrics,
+		minSeverity:         parseSeverity(cfg.IngestMinSeverity),
+		allowedServices:     parseServiceList(cfg.IngestAllowedServices),
+		excludedServices:    parseServiceList(cfg.IngestExcludedServices),
+		defaultTenant:       cfg.DefaultTenant,
+		trustResourceTenant: cfg.OTLPTrustResourceTenant,
 	}
 }
 
@@ -82,11 +158,13 @@ func (s *TraceServer) SetSampler(sm *Sampler) {
 
 func NewLogsServer(repo *storage.Repository, metrics *telemetry.Metrics, cfg *config.Config) *LogsServer {
 	return &LogsServer{
-		repo:             repo,
-		metrics:          metrics,
-		minSeverity:      parseSeverity(cfg.IngestMinSeverity),
-		allowedServices:  parseServiceList(cfg.IngestAllowedServices),
-		excludedServices: parseServiceList(cfg.IngestExcludedServices),
+		repo:                repo,
+		metrics:             metrics,
+		minSeverity:         parseSeverity(cfg.IngestMinSeverity),
+		allowedServices:     parseServiceList(cfg.IngestAllowedServices),
+		excludedServices:    parseServiceList(cfg.IngestExcludedServices),
+		defaultTenant:       cfg.DefaultTenant,
+		trustResourceTenant: cfg.OTLPTrustResourceTenant,
 	}
 }
 
@@ -97,11 +175,13 @@ func (s *LogsServer) SetLogCallback(cb func(storage.Log)) {
 
 func NewMetricsServer(repo *storage.Repository, metrics *telemetry.Metrics, aggregator *tsdb.Aggregator, cfg *config.Config) *MetricsServer {
 	return &MetricsServer{
-		repo:             repo,
-		metrics:          metrics,
-		aggregator:       aggregator,
-		allowedServices:  parseServiceList(cfg.IngestAllowedServices),
-		excludedServices: parseServiceList(cfg.IngestExcludedServices),
+		repo:                repo,
+		metrics:             metrics,
+		aggregator:          aggregator,
+		allowedServices:     parseServiceList(cfg.IngestAllowedServices),
+		excludedServices:    parseServiceList(cfg.IngestExcludedServices),
+		defaultTenant:       cfg.DefaultTenant,
+		trustResourceTenant: cfg.OTLPTrustResourceTenant,
 	}
 }
 
@@ -118,6 +198,8 @@ func (s *MetricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetr
 		if !shouldIngestService(serviceName, s.allowedServices, s.excludedServices) {
 			continue
 		}
+
+		tenantID := resolveTenant(ctx, resourceMetrics.Resource.Attributes, s.defaultTenant, s.trustResourceTenant)
 
 		for _, scopeMetrics := range resourceMetrics.ScopeMetrics {
 			for _, m := range scopeMetrics.Metrics {
@@ -146,8 +228,9 @@ func (s *MetricsServer) Export(ctx context.Context, req *colmetricspb.ExportMetr
 						Name:        m.Name,
 						ServiceName: serviceName,
 						Value:       val,
-						Timestamp:   time.Unix(0, int64(p.TimeUnixNano)),
-						Attributes:  make(map[string]interface{}),
+						Timestamp:   time.Unix(0, int64(p.TimeUnixNano)), // #nosec G115 -- OTLP time in nanos: uint64 source fits int64 until year 2262
+						Attributes:  make(map[string]any),
+						TenantID:    tenantID,
 					}
 
 					// Convert attributes to map for TSDB grouping
@@ -193,7 +276,6 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 	g.SetLimit(runtime.GOMAXPROCS(0) * 4)
 
 	for idx, resourceSpans := range req.ResourceSpans {
-		idx, resourceSpans := idx, resourceSpans // Capture
 		g.Go(func() error {
 			serviceName := getServiceName(resourceSpans.Resource.Attributes)
 
@@ -202,14 +284,16 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 				return nil
 			}
 
+			tenantID := resolveTenant(ctx, resourceSpans.Resource.Attributes, s.defaultTenant, s.trustResourceTenant)
+
 			localSpans := make([]storage.Span, 0)
 			localTraces := make([]storage.Trace, 0)
 			localLogs := make([]storage.Log, 0)
 
 			for _, scopeSpans := range resourceSpans.ScopeSpans {
 				for _, span := range scopeSpans.Spans {
-					startTime := time.Unix(0, int64(span.StartTimeUnixNano))
-					endTime := time.Unix(0, int64(span.EndTimeUnixNano))
+					startTime := time.Unix(0, int64(span.StartTimeUnixNano)) // #nosec G115 -- OTLP time in nanos: uint64 source fits int64 until year 2262
+					endTime := time.Unix(0, int64(span.EndTimeUnixNano))     // #nosec G115 -- OTLP time in nanos: uint64 source fits int64 until year 2262
 					duration := endTime.Sub(startTime).Microseconds()
 
 					// Adaptive sampling: evaluate before any allocations.
@@ -229,6 +313,7 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 
 					// Create Span Model
 					sModel := storage.Span{
+						TenantID:       tenantID,
 						TraceID:        fmt.Sprintf("%x", span.TraceId),
 						SpanID:         fmt.Sprintf("%x", span.SpanId),
 						ParentSpanID:   fmt.Sprintf("%x", span.ParentSpanId),
@@ -242,6 +327,7 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 					localSpans = append(localSpans, sModel)
 
 					tModel := storage.Trace{
+						TenantID:    tenantID,
 						TraceID:     fmt.Sprintf("%x", span.TraceId),
 						ServiceName: serviceName,
 						Timestamp:   startTime,
@@ -272,13 +358,14 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 						eventAttrs, _ := json.Marshal(event.Attributes)
 
 						l := storage.Log{
+							TenantID:       tenantID,
 							TraceID:        fmt.Sprintf("%x", span.TraceId),
 							SpanID:         fmt.Sprintf("%x", span.SpanId),
 							Severity:       severity,
-							Body:           storage.CompressedText(body),
+							Body:           body,
 							ServiceName:    serviceName,
 							AttributesJSON: storage.CompressedText(eventAttrs),
-							Timestamp:      time.Unix(0, int64(event.TimeUnixNano)),
+							Timestamp:      time.Unix(0, int64(event.TimeUnixNano)), // #nosec G115 -- OTLP time in nanos: uint64 source fits int64 until year 2262
 						}
 						localLogs = append(localLogs, l)
 					}
@@ -299,10 +386,11 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 							}
 
 							l := storage.Log{
+								TenantID:       tenantID,
 								TraceID:        fmt.Sprintf("%x", span.TraceId),
 								SpanID:         fmt.Sprintf("%x", span.SpanId),
 								Severity:       "ERROR",
-								Body:           storage.CompressedText(msg),
+								Body:           msg,
 								ServiceName:    serviceName,
 								AttributesJSON: "{}",
 								Timestamp:      endTime,
@@ -320,7 +408,7 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 		})
 	}
 
-	g.Wait()
+	_ = g.Wait()
 
 	// Merge results after all goroutines complete (no lock contention)
 	var spansToInsert []storage.Span
@@ -337,8 +425,6 @@ func (s *TraceServer) Export(ctx context.Context, req *coltracepb.ExportTraceSer
 		if err := s.repo.BatchCreateTraces(tracesToUpsert); err != nil {
 			slog.Error("❌ Failed to insert traces", "error", err)
 			// Continue anyway to allow spans to be inserted if traces exist from previous runs
-		} else {
-			// slog.Debug("✅ Successfully persisted trace records", "count", len(tracesToUpsert))
 		}
 	}
 
@@ -386,7 +472,6 @@ func (s *LogsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 	g, _ := errgroup.WithContext(ctx)
 
 	for idx, resourceLogs := range req.ResourceLogs {
-		idx, resourceLogs := idx, resourceLogs // Capture
 		g.Go(func() error {
 			serviceName := getServiceName(resourceLogs.Resource.Attributes)
 
@@ -394,6 +479,8 @@ func (s *LogsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 				slog.Debug("🚫 [LOGS] Dropped service", "service", serviceName)
 				return nil
 			}
+
+			tenantID := resolveTenant(ctx, resourceLogs.Resource.Attributes, s.defaultTenant, s.trustResourceTenant)
 
 			localLogs := make([]storage.Log, 0)
 
@@ -408,7 +495,7 @@ func (s *LogsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 						continue
 					}
 
-					timestamp := time.Unix(0, int64(l.TimeUnixNano))
+					timestamp := time.Unix(0, int64(l.TimeUnixNano)) // #nosec G115 -- OTLP time in nanos: uint64 source fits int64 until year 2262
 					if timestamp.Unix() == 0 {
 						timestamp = time.Now()
 					}
@@ -417,10 +504,11 @@ func (s *LogsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 					attrs, _ := json.Marshal(l.Attributes)
 
 					logEntry := storage.Log{
+						TenantID:       tenantID,
 						TraceID:        fmt.Sprintf("%x", l.TraceId),
 						SpanID:         fmt.Sprintf("%x", l.SpanId),
 						Severity:       severity,
-						Body:           storage.CompressedText(bodyStr),
+						Body:           bodyStr,
 						ServiceName:    serviceName,
 						AttributesJSON: storage.CompressedText(attrs),
 						Timestamp:      timestamp,
@@ -435,7 +523,7 @@ func (s *LogsServer) Export(ctx context.Context, req *collogspb.ExportLogsServic
 		})
 	}
 
-	g.Wait()
+	_ = g.Wait()
 
 	// Merge results after all goroutines complete (no lock contention)
 	var logsToInsert []storage.Log
@@ -529,15 +617,14 @@ func shouldIngestSeverity(level string, minLevel int) bool {
 	default:
 		// Fallback for strict numeric strings or unknown
 		// If "SEVERITY_NUMBER_INFO" etc.
-		if strings.Contains(upper, "INFO") {
-			lvl = 20
-		} else if strings.Contains(upper, "WARN") {
+		switch {
+		case strings.Contains(upper, "WARN"):
 			lvl = 30
-		} else if strings.Contains(upper, "ERR") {
+		case strings.Contains(upper, "ERR"):
 			lvl = 40
-		} else {
-			lvl = 20
-		} // Default treat as info
+		default:
+			lvl = 20 // Default treat as info (includes "INFO" and unknown)
+		}
 	}
 
 	return lvl >= minLevel

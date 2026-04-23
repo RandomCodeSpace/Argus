@@ -86,7 +86,7 @@ func initOTel() func(context.Context) error {
 
 func main() {
 	shutdown := initOTel()
-	defer shutdown(context.Background())
+	defer func() { _ = shutdown(context.Background()) }()
 
 	tracer = otel.Tracer("order-service")
 
@@ -154,7 +154,7 @@ func handleOrder(w http.ResponseWriter, r *http.Request) {
 		orderCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("service", "order-service")))
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Order Placed Successfully"))
+	_, _ = w.Write([]byte("Order Placed Successfully"))
 }
 
 func callAuthService(ctx context.Context) error {
@@ -169,7 +169,7 @@ func callAuthService(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("auth service returned %d", resp.StatusCode)
@@ -189,7 +189,7 @@ func callPaymentService(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("payment service returned %d", resp.StatusCode)
@@ -204,7 +204,7 @@ func callShippingService(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("shipping failed: %d", resp.StatusCode)
 	}
@@ -218,7 +218,7 @@ func callNotificationService(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("notification failed: %d", resp.StatusCode)
 	}

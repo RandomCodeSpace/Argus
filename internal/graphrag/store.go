@@ -348,6 +348,13 @@ func (ts *TraceStore) Prune() int {
 // --- SignalStore methods ---
 
 func (ss *SignalStore) UpsertLogCluster(id, template, severity, service string, ts time.Time) {
+	ss.UpsertLogClusterWithTemplate(id, template, severity, service, 0, nil, "", ts)
+}
+
+// UpsertLogClusterWithTemplate is the Drain-aware upsert. It stores the
+// mined template tokens, the stable template ID, and a sample raw log.
+// The older UpsertLogCluster is preserved for backward compatibility.
+func (ss *SignalStore) UpsertLogClusterWithTemplate(id, template, severity, service string, templateID uint64, tokens []string, sample string, ts time.Time) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 
@@ -356,11 +363,27 @@ func (ss *SignalStore) UpsertLogCluster(id, template, severity, service string, 
 		lc = &LogClusterNode{
 			ID:           id,
 			Template:     template,
+			TemplateID:   templateID,
 			FirstSeen:    ts,
 			LastSeen:     ts,
 			SeverityDist: make(map[string]int64),
+			SampleLog:    sample,
+		}
+		if tokens != nil {
+			lc.TemplateTokens = append([]string(nil), tokens...)
 		}
 		ss.LogClusters[id] = lc
+	} else {
+		// Template may have generalized (merge in Drain): update tokens/id/string.
+		if templateID != 0 {
+			lc.TemplateID = templateID
+		}
+		if template != "" {
+			lc.Template = template
+		}
+		if tokens != nil {
+			lc.TemplateTokens = append(lc.TemplateTokens[:0], tokens...)
+		}
 	}
 	lc.Count++
 	lc.SeverityDist[severity]++

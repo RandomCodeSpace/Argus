@@ -13,7 +13,7 @@ export function useSystemGraph(pollInterval = 60_000) {
       const res = await fetch('/api/system/graph');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setCache(res.headers.get('X-Cache') ?? '');
-      setGraph(await res.json());
+      setGraph((await res.json()) as SystemGraphResponse);
       setError(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'fetch failed');

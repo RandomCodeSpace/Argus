@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"math"
@@ -70,14 +71,14 @@ func (s *Server) handleGetSystemGraph(w http.ResponseWriter, r *http.Request) {
 	if cached, ok := s.cache.Get(cacheKey); ok {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Cache", "HIT")
-		json.NewEncoder(w).Encode(cached)
+		_ = json.NewEncoder(w).Encode(cached)
 		return
 	}
 
 	resp := s.buildGraphFromMemory()
 	if resp == nil {
 		// Graph not yet hydrated — fall back to DB path.
-		resp = s.buildGraphFromDB()
+		resp = s.buildGraphFromDB(r.Context())
 		if resp == nil {
 			http.Error(w, "failed to build system graph", http.StatusInternalServerError)
 			return
@@ -87,7 +88,7 @@ func (s *Server) handleGetSystemGraph(w http.ResponseWriter, r *http.Request) {
 	s.cache.Set(cacheKey, resp, cacheTTL)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // buildGraphFromMemory converts the in-memory graph snapshot to the API response.
@@ -216,11 +217,12 @@ func buildAlertsFromGraphRAG(service string, errorRate, avgLatencyMs float64) []
 }
 
 // buildGraphFromDB is the fallback path used before the in-memory graph is ready.
-func (s *Server) buildGraphFromDB() *SystemGraphResponse {
+// Honors the tenant carried on ctx.
+func (s *Server) buildGraphFromDB(ctx context.Context) *SystemGraphResponse {
 	end := time.Now()
 	start := end.Add(-1 * time.Hour)
 
-	svcMap, err := s.repo.GetServiceMapMetrics(start, end)
+	svcMap, err := s.repo.GetServiceMapMetrics(ctx, start, end)
 	if err != nil {
 		slog.Error("Failed to get service map for system graph", "error", err)
 		return nil

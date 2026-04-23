@@ -16,12 +16,12 @@ import (
 // A background replay worker periodically attempts to re-insert failed batches
 // with exponential backoff, bounded by configurable file count and disk limits.
 type DeadLetterQueue struct {
-	dir        string
-	interval   time.Duration
-	replayFn   func(data []byte) error
-	stopCh     chan struct{}
-	wg         sync.WaitGroup
-	mu         sync.Mutex
+	dir      string
+	interval time.Duration
+	replayFn func(data []byte) error
+	stopCh   chan struct{}
+	wg       sync.WaitGroup
+	mu       sync.Mutex
 
 	// Bounds
 	maxFiles   int   // 0 = unlimited
@@ -32,9 +32,9 @@ type DeadLetterQueue struct {
 	retries map[string]int
 
 	// Metric callbacks (optional, set via SetMetrics)
-	onEnqueue func()
-	onSuccess func()
-	onFailure func()
+	onEnqueue   func()
+	onSuccess   func()
+	onFailure   func()
 	onDiskBytes func(int64)
 }
 
@@ -47,7 +47,7 @@ func NewDLQ(dir string, interval time.Duration, replayFn func(data []byte) error
 // NewDLQWithLimits creates a DLQ with explicit bounds.
 func NewDLQWithLimits(dir string, interval time.Duration, replayFn func(data []byte) error,
 	maxFiles int, maxDiskMB int64, maxRetries int) (*DeadLetterQueue, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create DLQ directory %s: %w", dir, err)
 	}
 
@@ -98,7 +98,13 @@ func (d *DeadLetterQueue) DiskBytes() int64 {
 
 // Enqueue serializes the given batch to JSON and writes it to disk.
 // Enforces file count and disk size limits (FIFO eviction when exceeded).
-func (d *DeadLetterQueue) Enqueue(batch interface{}) error {
+//
+// Uses os.CreateTemp under the hood so concurrent enqueues never collide on
+// a filename, even when the OS clock's resolution is coarser than goroutine
+// scheduling (Windows, virtualised hosts) or thousands of failures hit the
+// same nanosecond. A nanosecond-prefixed pattern is still passed to CreateTemp
+// so the files sort chronologically for FIFO eviction.
+func (d *DeadLetterQueue) Enqueue(batch any) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -110,11 +116,31 @@ func (d *DeadLetterQueue) Enqueue(batch interface{}) error {
 	// Enforce limits before writing a new file.
 	d.enforceLimits(int64(len(data)))
 
-	filename := fmt.Sprintf("batch_%d.json", time.Now().UnixNano())
-	path := filepath.Join(d.dir, filename)
+	// batch_<nanos>_*.json — CreateTemp replaces `*` with a unique suffix so
+	// two goroutines in the same nanosecond still get distinct files.
+	pattern := fmt.Sprintf("batch_%d_*.json", time.Now().UnixNano())
+	f, err := os.CreateTemp(d.dir, pattern)
+	if err != nil {
+		return fmt.Errorf("DLQ: failed to create file: %w", err)
+	}
+	path := f.Name()
+	filename := filepath.Base(path)
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("DLQ: failed to write file %s: %w", path, err)
+	// Tighten perms: CreateTemp defaults to 0o600 on Unix already, but set
+	// explicitly for clarity and for platforms with different defaults.
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("DLQ: failed to chmod %s: %w", path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("DLQ: failed to write %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("DLQ: failed to close %s: %w", path, err)
 	}
 
 	slog.Warn("📦 Batch written to DLQ", "file", filename, "bytes", len(data))
@@ -166,7 +192,7 @@ func (d *DeadLetterQueue) enforceLimits(incomingBytes int64) {
 		// Evict oldest file.
 		path := filepath.Join(d.dir, files[i].name)
 		totalBytes -= files[i].size
-		os.Remove(path)
+		_ = os.Remove(path)
 		delete(d.retries, files[i].name)
 		slog.Warn("🗑️  DLQ FIFO eviction", "file", files[i].name)
 		i++
@@ -242,7 +268,7 @@ func (d *DeadLetterQueue) processFiles() {
 		retries := d.retries[name]
 		if d.maxRetries > 0 && retries >= d.maxRetries {
 			path := filepath.Join(d.dir, name)
-			os.Remove(path)
+			_ = os.Remove(path)
 			delete(d.retries, name)
 			d.mu.Unlock()
 			slog.Error("DLQ: max retries exceeded, dropping file", "file", name, "retries", retries)
@@ -266,7 +292,8 @@ func (d *DeadLetterQueue) processFiles() {
 		}
 
 		path := filepath.Join(d.dir, name)
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed from d.dir (operator-controlled) + files we previously wrote
+
 		if err != nil {
 			slog.Error("DLQ: failed to read file", "file", name, "error", err)
 			continue
@@ -284,7 +311,7 @@ func (d *DeadLetterQueue) processFiles() {
 			}
 			// Touch the file to reset the backoff timer.
 			now := time.Now()
-			os.Chtimes(path, now, now)
+			_ = os.Chtimes(path, now, now)
 			continue
 		}
 

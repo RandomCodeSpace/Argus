@@ -59,7 +59,7 @@ func initTracer() func(context.Context) error {
 
 func main() {
 	shutdown := initTracer()
-	defer shutdown(context.Background())
+	defer func() { _ = shutdown(context.Background()) }()
 
 	tracer = otel.Tracer("auth-service")
 
@@ -98,7 +98,7 @@ func handleValidate(w http.ResponseWriter, r *http.Request) {
 
 	span.AddEvent("token_validated", trace.WithAttributes(attribute.String("status", "success")))
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Authorized"))
+	_, _ = w.Write([]byte("Authorized"))
 }
 
 func callUserService(ctx context.Context) error {
@@ -113,7 +113,7 @@ func callUserService(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("user profile rejected: %d", resp.StatusCode)

@@ -1,0 +1,71 @@
+# golangci-lint v2 configuration for OtelContext.
+# Curated set of linters — no "enable-all" sprawl.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    # Core correctness
+    - errcheck       # unchecked errors
+    - govet          # standard vet
+    - ineffassign    # unused assignments
+    - staticcheck    # core correctness + Go 1.25 hints (rangeint, stringsseq, etc.)
+    - unused         # dead code
+
+    # Security & idioms
+    - gosec          # security issues
+    - gocritic       # idiomatic Go
+    - misspell       # comment/string typos
+    - unconvert      # redundant type conversions
+    - prealloc       # slice preallocation opportunities
+
+    # Resource hygiene
+    - bodyclose      # HTTP response body close
+    - rowserrcheck   # sql.Rows.Err() check
+    - sqlclosecheck  # sql resource leak detection
+
+    # Language pitfalls
+    - copyloopvar    # pre-Go-1.22 loop variable semantics
+    - nolintlint     # well-formed //nolint directives
+
+  exclusions:
+    rules:
+      # Test files commonly ignore errors intentionally (t.Cleanup, defer close, etc.).
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+      # Drain tests exercise edge cases that trip gosec heuristics.
+      - path: internal/graphrag/drain_test\.go
+        linters:
+          - gosec
+      - path: internal/graphrag/drain_aggressive_test\.go
+        linters:
+          - gosec
+      # test/ contains microservice simulators (chaos testing). They intentionally
+      # use math/rand for chaos probabilities (G404), ListenAndServe without timeouts
+      # (G114), and log.Fatal (exitAfterDefer). Not production code.
+      - path: ^test/
+        linters:
+          - gosec
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  formats:
+    text:
+      path: stdout
+      colors: true
+      print-linter-name: true
+      print-issued-lines: true

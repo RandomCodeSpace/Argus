@@ -1,6 +1,5 @@
 import { useRef, useState } from 'react'
-import * as Dialog from '@radix-ui/react-dialog'
-import * as Tabs from '@radix-ui/react-tabs'
+import { Modal, Tabs } from '@mantine/core'
 import { Copy, SendHorizontal, Terminal, X } from 'lucide-react'
 import type { MCPTool } from '@/types/api'
 import { colorJSON } from '@/lib/utils'
@@ -91,60 +90,67 @@ export default function RPCPopup({ tool, onClose, onSend }: Props) {
   ]
 
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="mc-overlay" />
-        <Dialog.Content className="mc-modal" style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 'min(1040px, calc(100vw - 2rem))', height: '88vh', display: 'flex', flexDirection: 'column', zIndex: 50 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.9rem 1.25rem', borderBottom: '1px solid var(--border)' }}>
-            <div style={{ width: 34, height: 34, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, var(--bg-card), var(--bg-panel))', border: '1px solid var(--border-hover)' }}>
-              <Terminal size={14} style={{ color: 'var(--color-accent)' }} />
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <Dialog.Title asChild>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  <span style={{ fontWeight: 700, fontFamily: 'ui-monospace, monospace', fontSize: '0.84rem' }}>{name}</span>
-                  <span className="mc-badge">{method}</span>
-                </div>
-              </Dialog.Title>
-              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>{tool?.description || 'Manual JSON-RPC request builder'}</div>
-            </div>
-            <Dialog.Close asChild>
-              <button className="mc-btn-icon" style={{ width: 28, padding: 0, justifyContent: 'center' }}><X size={13} /></button>
-            </Dialog.Close>
+    <Modal
+      opened
+      onClose={onClose}
+      withCloseButton={false}
+      padding={0}
+      size="min(1040px, calc(100vw - 2rem))"
+      centered
+      classNames={{ content: 'mc-modal', overlay: 'mc-overlay' }}
+      styles={{
+        content: { height: '88vh', display: 'flex', flexDirection: 'column' },
+        body: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, padding: 0 },
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.9rem 1.25rem', borderBottom: '1px solid var(--border)' }}>
+        <div style={{ width: 34, height: 34, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, var(--bg-card), var(--bg-panel))', border: '1px solid var(--border-hover)' }}>
+          <Terminal size={14} style={{ color: 'var(--color-accent)' }} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 700, fontFamily: 'ui-monospace, monospace', fontSize: '0.84rem' }}>{name}</span>
+            <span className="mc-badge">{method}</span>
           </div>
-          <Tabs.Root value={method} onValueChange={(value) => selectMethod(value as RpcMethod)}>
-            <Tabs.List style={{ display: 'flex', gap: '0.1rem', padding: '0 1rem', borderBottom: '1px solid var(--border)', background: 'var(--bg-card)' }}>
-              {methods.map((item) => (
-                <Tabs.Trigger key={item.value} value={item.value} style={{ background: 'none', border: 'none', borderBottom: '2px solid transparent', color: 'var(--text-muted)', cursor: 'pointer', padding: '0.5rem 0.75rem', fontSize: '0.7rem', fontFamily: 'ui-monospace, monospace' }}>
-                  {item.label}
-                </Tabs.Trigger>
-              ))}
-            </Tabs.List>
-          </Tabs.Root>
-          {error && <div style={{ padding: '0.6rem 1.25rem', background: 'rgba(239,68,68,0.08)', borderBottom: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.72rem' }}>{error}</div>}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', flex: 1, minHeight: 0 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, borderRight: '1px solid var(--border)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.9rem', borderBottom: '1px solid var(--border)' }}>
-                <span style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Request</span>
-                <button ref={copyRef} className="mc-copy-btn" onClick={handleCopy}><Copy size={11} /> Copy</button>
-              </div>
-              <div style={{ padding: '0.75rem', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-                <textarea className="mc-textarea" style={{ flex: 1, minHeight: 0 }} value={requestText} onChange={(event) => setRequestText(event.target.value)} spellCheck={false} />
-              </div>
-              <div style={{ padding: '0 0.75rem 0.75rem' }}>
-                <button className="mc-send-btn" disabled={sending} onClick={handleSend} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.45rem' }}><SendHorizontal size={12} /> {sending ? 'Sending…' : 'Send'}</button>
-              </div>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.9rem', borderBottom: '1px solid var(--border)' }}>
-                <span style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Response</span>
-                {timing && <span className="mc-badge">{timing}</span>}
-              </div>
-              <pre className="mc-code" style={{ margin: '0.75rem', flex: 1, minHeight: 0, overflow: 'auto', padding: '0.9rem' }} dangerouslySetInnerHTML={{ __html: responseHTML || '<span style="color:var(--text-dim)">—</span>' }} />
-            </div>
+          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>{tool?.description || 'Manual JSON-RPC request builder'}</div>
+        </div>
+        <button className="mc-btn-icon" style={{ width: 28, padding: 0, justifyContent: 'center' }} onClick={onClose} aria-label="Close"><X size={13} /></button>
+      </div>
+      <Tabs value={method} onChange={(value) => value && selectMethod(value as RpcMethod)} variant="default" unstyled>
+        <Tabs.List style={{ display: 'flex', gap: '0.1rem', padding: '0 1rem', borderBottom: '1px solid var(--border)', background: 'var(--bg-card)' }}>
+          {methods.map((item) => (
+            <Tabs.Tab
+              key={item.value}
+              value={item.value}
+              style={{ background: 'none', border: 'none', borderBottom: '2px solid transparent', color: 'var(--text-muted)', cursor: 'pointer', padding: '0.5rem 0.75rem', fontSize: '0.7rem', fontFamily: 'ui-monospace, monospace' }}
+            >
+              {item.label}
+            </Tabs.Tab>
+          ))}
+        </Tabs.List>
+      </Tabs>
+      {error && <div style={{ padding: '0.6rem 1.25rem', background: 'rgba(239,68,68,0.08)', borderBottom: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.72rem' }}>{error}</div>}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', flex: 1, minHeight: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, borderRight: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.9rem', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Request</span>
+            <button ref={copyRef} className="mc-copy-btn" onClick={handleCopy}><Copy size={11} /> Copy</button>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+          <div style={{ padding: '0.75rem', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <textarea className="mc-textarea" style={{ flex: 1, minHeight: 0 }} value={requestText} onChange={(event) => setRequestText(event.target.value)} spellCheck={false} />
+          </div>
+          <div style={{ padding: '0 0.75rem 0.75rem' }}>
+            <button className="mc-send-btn" disabled={sending} onClick={handleSend} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.45rem' }}><SendHorizontal size={12} /> {sending ? 'Sending…' : 'Send'}</button>
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.9rem', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Response</span>
+            {timing && <span className="mc-badge">{timing}</span>}
+          </div>
+          <pre className="mc-code" style={{ margin: '0.75rem', flex: 1, minHeight: 0, overflow: 'auto', padding: '0.9rem' }} dangerouslySetInnerHTML={{ __html: responseHTML || '<span style="color:var(--text-dim)">—</span>' }} />
+        </div>
+      </div>
+    </Modal>
   )
 }

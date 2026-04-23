@@ -10,13 +10,13 @@ import (
 // Always keeps: error traces, slow traces (duration > latencyThresholdMs), new services.
 // Samples healthy traces at the configured rate using a per-service token bucket.
 type Sampler struct {
-	rate                float64 // 0.0–1.0, fraction to keep
-	alwaysOnErrors      bool
-	latencyThresholdMs  float64 // always keep traces slower than this
-	mu                  sync.Mutex
-	buckets             map[string]*tokenBucket
-	totalSeen           atomic.Int64
-	totalDropped        atomic.Int64
+	rate               float64 // 0.0–1.0, fraction to keep
+	alwaysOnErrors     bool
+	latencyThresholdMs float64 // always keep traces slower than this
+	mu                 sync.Mutex
+	buckets            map[string]*tokenBucket
+	totalSeen          atomic.Int64
+	totalDropped       atomic.Int64
 }
 
 // NewSampler creates a Sampler with the given parameters.
@@ -90,8 +90,8 @@ func (s *Sampler) Stats() (int64, int64) {
 // tokenBucket is a simple token bucket for sampling decisions.
 // Refills at `rate` tokens per second, max capacity 1.0.
 type tokenBucket struct {
-	rate     float64   // tokens per second
-	tokens   float64   // current tokens (0.0–1.0)
+	rate     float64 // tokens per second
+	tokens   float64 // current tokens (0.0–1.0)
 	lastTick time.Time
 }
 

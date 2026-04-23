@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from 'react'
+import { FixedSizeList, type ListChildComponentProps } from 'react-window'
 import type { Trace } from '@/types/api'
 
 interface Props {
@@ -10,8 +12,67 @@ interface Props {
   onClearFilter: () => void
 }
 
+// Fixed row size matches the original card: padding 0.9rem + 3 text rows + gap.
+// 112px accommodates the 0.65rem inter-row gap inside the slot.
+const ITEM_SIZE = 112
+
+interface RowData {
+  traces: Trace[]
+  selectedId: string | undefined
+  onSelect: (traceId: string) => void
+}
+
+function TraceRow({ index, style, data }: ListChildComponentProps<RowData>) {
+  const trace = data.traces[index]
+  const isSelected = data.selectedId === trace.trace_id
+  return (
+    <div style={{ ...style, paddingBottom: '0.65rem', boxSizing: 'border-box' }}>
+      <button
+        onClick={() => data.onSelect(trace.trace_id)}
+        className="card"
+        style={{
+          textAlign: 'left',
+          background: isSelected ? 'var(--nav-active-bg)' : 'var(--bg-card)',
+          borderColor: isSelected ? 'var(--color-accent)' : 'var(--border)',
+          padding: '0.9rem',
+          cursor: 'pointer',
+          width: '100%',
+          height: '100%',
+          display: 'block',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.35rem' }}>
+          <div style={{ fontWeight: 700, fontSize: '0.78rem' }}>{trace.service_name}</div>
+          <span className={`badge ${trace.status.includes('ERROR') ? 'badge-red' : 'badge-green'}`}>{trace.status || 'OK'}</span>
+        </div>
+        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.3rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{trace.operation || trace.trace_id}</div>
+        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+          <span className="badge">{trace.span_count} spans</span>
+          <span className="badge">{trace.duration_ms?.toFixed(1)} ms</span>
+        </div>
+      </button>
+    </div>
+  )
+}
+
 export default function TracesPage({ traces, selected, loading, error, onSelect, serviceFilter, onClearFilter }: Props) {
   const filtered = serviceFilter ? traces.filter((t) => t.service_name === serviceFilter) : traces
+
+  const listContainerRef = useRef<HTMLDivElement | null>(null)
+  const [size, setSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 })
+
+  useEffect(() => {
+    const el = listContainerRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect
+        setSize({ width, height })
+      }
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   return (
     <div className="traces-layout">
@@ -26,22 +87,21 @@ export default function TracesPage({ traces, selected, loading, error, onSelect,
             <button onClick={onClearFilter} style={{ background: 'none', border: 'none', color: '#38bdf8', cursor: 'pointer', fontSize: 12 }}>×</button>
           </div>
         )}
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '0.65rem', overflowY: 'auto', overflowX: 'hidden' }}>
-          {loading && <div style={{ color: 'var(--text-muted)' }}>Loading traces…</div>}
-          {error && <div style={{ color: '#ef4444' }}>{error}</div>}
-          {filtered.map((trace) => (
-            <button key={trace.trace_id} onClick={() => onSelect(trace.trace_id)} className="card" style={{ textAlign: 'left', background: selected?.trace_id === trace.trace_id ? 'var(--nav-active-bg)' : 'var(--bg-card)', borderColor: selected?.trace_id === trace.trace_id ? 'var(--color-accent)' : 'var(--border)', padding: '0.9rem', cursor: 'pointer' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.35rem' }}>
-                <div style={{ fontWeight: 700, fontSize: '0.78rem' }}>{trace.service_name}</div>
-                <span className={`badge ${trace.status.includes('ERROR') ? 'badge-red' : 'badge-green'}`}>{trace.status || 'OK'}</span>
-              </div>
-              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.3rem' }}>{trace.operation || trace.trace_id}</div>
-              <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-                <span className="badge">{trace.span_count} spans</span>
-                <span className="badge">{trace.duration_ms?.toFixed(1)} ms</span>
-              </div>
-            </button>
-          ))}
+        {loading && <div style={{ color: 'var(--text-muted)' }}>Loading traces…</div>}
+        {error && <div style={{ color: '#ef4444' }}>{error}</div>}
+        <div ref={listContainerRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {size.height > 0 && filtered.length > 0 && (
+            <FixedSizeList<RowData>
+              height={size.height}
+              width={size.width}
+              itemCount={filtered.length}
+              itemSize={ITEM_SIZE}
+              itemData={{ traces: filtered, selectedId: selected?.trace_id, onSelect }}
+              overscanCount={6}
+            >
+              {TraceRow}
+            </FixedSizeList>
+          )}
         </div>
       </div>
       <div className="traces-right-col">

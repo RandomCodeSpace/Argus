@@ -2,47 +2,76 @@ package ingest
 
 import (
 	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 
+	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	spb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	spb "google.golang.org/genproto/googleapis/rpc/status"
 )
 
+// withTenantFromHTTP attaches a tenant ID from the X-Tenant-ID header (if any)
+// to the request context before delegating to the gRPC Export methods.
+// Uses the shared storage.WithTenantContext helper so ingest and read paths
+// agree on the context key.
+func withTenantFromHTTP(r *http.Request) context.Context {
+	if v := r.Header.Get("X-Tenant-ID"); v != "" {
+		return storage.WithTenantContext(r.Context(), v)
+	}
+	return r.Context()
+}
+
 const (
-	defaultMaxBodyBytes = 4 * 1024 * 1024 // 4MB
+	defaultMaxBodyBytes = 4 * 1024 * 1024  // 4MB  — pre-decompression wire cap
+	maxDecompressedBody = 64 * 1024 * 1024 // 64MB — post-gzip cap (zip-bomb guard)
 	contentTypeProtobuf = "application/x-protobuf"
 	contentTypeJSON     = "application/json"
 )
 
+// errDecompressedTooLarge is returned when a gzipped request body expands past
+// maxDecompressedBody — a classic compression-bomb scenario.
+var errDecompressedTooLarge = errors.New("decompressed body exceeds limit")
+
 // HTTPHandler provides HTTP OTLP endpoints that delegate to the existing gRPC Export() methods.
 type HTTPHandler struct {
-	traces       *TraceServer
-	logs         *LogsServer
-	metrics      *MetricsServer
-	maxBodyBytes int64
+	traces               *TraceServer
+	logs                 *LogsServer
+	metrics              *MetricsServer
+	maxBodyBytes         int64 // pre-decompress wire size cap
+	maxDecompressedBytes int64 // post-gzip decompressed size cap (zip-bomb guard)
 }
 
 // NewHTTPHandler creates an HTTP OTLP handler wrapping the existing gRPC servers.
 func NewHTTPHandler(traces *TraceServer, logs *LogsServer, metrics *MetricsServer) *HTTPHandler {
 	return &HTTPHandler{
-		traces:       traces,
-		logs:         logs,
-		metrics:      metrics,
-		maxBodyBytes: defaultMaxBodyBytes,
+		traces:               traces,
+		logs:                 logs,
+		metrics:              metrics,
+		maxBodyBytes:         defaultMaxBodyBytes,
+		maxDecompressedBytes: maxDecompressedBody,
 	}
 }
 
-// SetMaxBodyBytes configures the maximum request body size.
+// SetMaxBodyBytes configures the maximum pre-decompression request body size.
 func (h *HTTPHandler) SetMaxBodyBytes(n int64) {
 	if n > 0 {
 		h.maxBodyBytes = n
+	}
+}
+
+// SetMaxDecompressedBytes configures the maximum post-gzip body size. Rejecting
+// larger inputs defends against compression bombs from authed clients.
+func (h *HTTPHandler) SetMaxDecompressedBytes(n int64) {
+	if n > 0 {
+		h.maxDecompressedBytes = n
 	}
 }
 
@@ -56,7 +85,11 @@ func (h *HTTPHandler) RegisterRoutes(mux *http.ServeMux) {
 func (h *HTTPHandler) handleTraces(w http.ResponseWriter, r *http.Request) {
 	body, err := h.readBody(r)
 	if err != nil {
-		writeOTLPError(w, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, errDecompressedTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeOTLPError(w, status, err.Error())
 		return
 	}
 
@@ -66,7 +99,7 @@ func (h *HTTPHandler) handleTraces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.traces.Export(r.Context(), req)
+	resp, err := h.traces.Export(withTenantFromHTTP(r), req)
 	if err != nil {
 		slog.Error("HTTP OTLP traces export failed", "error", err)
 		writeOTLPError(w, http.StatusInternalServerError, err.Error())
@@ -79,7 +112,11 @@ func (h *HTTPHandler) handleTraces(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) handleLogs(w http.ResponseWriter, r *http.Request) {
 	body, err := h.readBody(r)
 	if err != nil {
-		writeOTLPError(w, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, errDecompressedTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeOTLPError(w, status, err.Error())
 		return
 	}
 
@@ -89,7 +126,7 @@ func (h *HTTPHandler) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.logs.Export(r.Context(), req)
+	resp, err := h.logs.Export(withTenantFromHTTP(r), req)
 	if err != nil {
 		slog.Error("HTTP OTLP logs export failed", "error", err)
 		writeOTLPError(w, http.StatusInternalServerError, err.Error())
@@ -102,7 +139,11 @@ func (h *HTTPHandler) handleLogs(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPHandler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	body, err := h.readBody(r)
 	if err != nil {
-		writeOTLPError(w, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, errDecompressedTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeOTLPError(w, status, err.Error())
 		return
 	}
 
@@ -112,7 +153,7 @@ func (h *HTTPHandler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.metrics.Export(r.Context(), req)
+	resp, err := h.metrics.Export(withTenantFromHTTP(r), req)
 	if err != nil {
 		slog.Error("HTTP OTLP metrics export failed", "error", err)
 		writeOTLPError(w, http.StatusInternalServerError, err.Error())
@@ -122,7 +163,12 @@ func (h *HTTPHandler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	h.writeResponse(w, r, resp)
 }
 
-// readBody reads the request body with size limit and optional gzip decompression.
+// readBody reads the request body with a pre-decompression size limit (wire
+// cap) and, for gzipped requests, a separate post-decompression cap that
+// prevents compression-bomb amplification from authed clients.
+//
+// Returns errDecompressedTooLarge when the decompressed stream exceeds
+// h.maxDecompressedBytes so callers can map it to HTTP 413.
 func (h *HTTPHandler) readBody(r *http.Request) ([]byte, error) {
 	var reader io.Reader = http.MaxBytesReader(nil, r.Body, h.maxBodyBytes)
 
@@ -131,8 +177,22 @@ func (h *HTTPHandler) readBody(r *http.Request) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 		}
-		defer gz.Close()
-		reader = gz
+		defer func() { _ = gz.Close() }()
+		// +1 so a body that is exactly maxDecompressedBytes still fits; anything
+		// larger triggers the sentinel.
+		limit := h.maxDecompressedBytes
+		reader = io.LimitReader(gz, limit+1)
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			if err.Error() == "http: request body too large" {
+				return nil, fmt.Errorf("request body exceeds %d bytes limit", h.maxBodyBytes)
+			}
+			return nil, fmt.Errorf("failed to read request body: %w", err)
+		}
+		if int64(len(body)) > limit {
+			return nil, fmt.Errorf("%w: decompressed body > %d bytes", errDecompressedTooLarge, limit)
+		}
+		return body, nil
 	}
 
 	body, err := io.ReadAll(reader)
@@ -175,7 +235,7 @@ func (h *HTTPHandler) writeResponse(w http.ResponseWriter, r *http.Request, msg 
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write(data)
+		_, _ = w.Write(data)
 	} else {
 		w.Header().Set("Content-Type", contentTypeProtobuf)
 		data, err := proto.Marshal(msg)
@@ -184,7 +244,7 @@ func (h *HTTPHandler) writeResponse(w http.ResponseWriter, r *http.Request, msg 
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write(data)
+		_, _ = w.Write(data)
 	}
 }
 
@@ -192,7 +252,7 @@ func (h *HTTPHandler) writeResponse(w http.ResponseWriter, r *http.Request, msg 
 func writeOTLPError(w http.ResponseWriter, statusCode int, msg string) {
 	// OTLP HTTP spec: errors are returned as Status protobuf
 	status := &spb.Status{
-		Code:    int32(statusCode),
+		Code:    int32(statusCode), // #nosec G115 -- HTTP status code always fits int32
 		Message: msg,
 	}
 	data, err := proto.Marshal(status)
@@ -202,5 +262,5 @@ func writeOTLPError(w http.ResponseWriter, statusCode int, msg string) {
 	}
 	w.Header().Set("Content-Type", contentTypeProtobuf)
 	w.WriteHeader(statusCode)
-	w.Write(data)
+	_, _ = w.Write(data)
 }

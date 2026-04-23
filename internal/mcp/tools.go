@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -113,7 +114,7 @@ var toolDefs = []Tool{
 	},
 	{
 		Name:        "get_storage_status",
-		Description: "Returns hot/cold storage sizes, DLQ size, last archival run, and database health.",
+		Description: "Returns hot DB size, DLQ size, and database health.",
 		InputSchema: InputSchema{Type: "object"},
 	},
 	{
@@ -249,41 +250,57 @@ var toolDefs = []Tool{
 			},
 		},
 	},
-	{
-		Name:        "search_cold_archive",
-		Description: "Searches archived data older than the hot retention window. Returns results with source: 'cold'.",
-		InputSchema: InputSchema{
-			Type:     "object",
-			Required: []string{"type", "start", "end"},
-			Properties: map[string]Property{
-				"type":  {Type: "string", Description: "Data type: logs, traces, or metrics."},
-				"start": {Type: "string", Description: "Start time RFC3339."},
-				"end":   {Type: "string", Description: "End time RFC3339."},
-				"query": {Type: "string", Description: "Optional text filter."},
-			},
-		},
-	},
+}
+
+// mcpCtx returns a tenant-scoped context for repository calls. If the caller's
+// ctx already carries a tenant (set by the MCP transport from X-Tenant-ID), it
+// is reused as-is; otherwise the server's default tenant is applied.
+//
+// Handlers invoked from the HTTP transport should always pass r.Context() in
+// (via toolHandler), which keeps tenant scoping end-to-end and makes cross-
+// tenant reads impossible through MCP.
+func mcpCtx(ctx context.Context) context.Context {
+	if ctx == nil {
+		return storage.WithTenantContext(context.Background(), storage.DefaultTenantID)
+	}
+	if storage.HasTenantContext(ctx) {
+		return ctx
+	}
+	return storage.WithTenantContext(ctx, storage.DefaultTenantID)
 }
 
 // toolHandler routes a tool call to its implementation and returns the result.
-func (s *Server) toolHandler(name string, args map[string]any) ToolCallResult {
+// ctx carries the tenant resolved from the MCP transport layer.
+func (s *Server) toolHandler(ctx context.Context, name string, args map[string]any) (res ToolCallResult) {
+	// Fix 6: emit OtelContext_mcp_tool_invocations_total{tool,status}. IsError
+	// on the returned result drives the status label.
+	defer func() {
+		if s == nil || s.metrics == nil || s.metrics.MCPToolInvocationsTotal == nil {
+			return
+		}
+		status := "ok"
+		if res.IsError {
+			status = "error"
+		}
+		s.metrics.MCPToolInvocationsTotal.WithLabelValues(name, status).Inc()
+	}()
 	switch name {
 	case "get_system_graph":
 		return s.toolGetSystemGraph(args)
 	case "get_service_health":
 		return s.toolGetServiceHealth(args)
 	case "search_logs":
-		return s.toolSearchLogs(args)
+		return s.toolSearchLogs(ctx, args)
 	case "tail_logs":
-		return s.toolTailLogs(args)
+		return s.toolTailLogs(ctx, args)
 	case "get_trace":
-		return s.toolGetTrace(args)
+		return s.toolGetTrace(ctx, args)
 	case "search_traces":
-		return s.toolSearchTraces(args)
+		return s.toolSearchTraces(ctx, args)
 	case "get_metrics":
-		return s.toolGetMetrics(args)
+		return s.toolGetMetrics(ctx, args)
 	case "get_dashboard_stats":
-		return s.toolGetDashboardStats(args)
+		return s.toolGetDashboardStats(ctx, args)
 	case "get_storage_status":
 		return s.toolGetStorageStatus()
 	case "find_similar_logs":
@@ -295,7 +312,7 @@ func (s *Server) toolHandler(name string, args map[string]any) ToolCallResult {
 	case "get_error_chains":
 		return s.toolGetErrorChains(args)
 	case "trace_graph":
-		return s.toolTraceGraph(args)
+		return s.toolTraceGraph(ctx, args)
 	case "impact_analysis":
 		return s.toolImpactAnalysis(args)
 	case "root_cause_analysis":
@@ -310,8 +327,6 @@ func (s *Server) toolHandler(name string, args map[string]any) ToolCallResult {
 		return s.toolGetGraphSnapshot(args)
 	case "get_anomaly_timeline":
 		return s.toolGetAnomalyTimeline(args)
-	case "search_cold_archive":
-		return s.toolSearchColdArchive(args)
 	default:
 		return errorResult(fmt.Sprintf("unknown tool: %s", name))
 	}
@@ -371,7 +386,7 @@ func toLogSummaries(logs []storage.Log) []logSummary {
 			Timestamp:   l.Timestamp,
 			Severity:    l.Severity,
 			ServiceName: l.ServiceName,
-			Body:        string(l.Body),
+			Body:        l.Body,
 			TraceID:     l.TraceID,
 			SpanID:      l.SpanID,
 		}
@@ -379,7 +394,7 @@ func toLogSummaries(logs []storage.Log) []logSummary {
 	return out
 }
 
-func (s *Server) toolSearchLogs(args map[string]any) ToolCallResult {
+func (s *Server) toolSearchLogs(ctx context.Context, args map[string]any) ToolCallResult {
 	end := time.Now()
 	start := end.Add(-24 * time.Hour) // wider default window for AI agents
 	parseTime(args, "start", &start)
@@ -410,7 +425,7 @@ func (s *Server) toolSearchLogs(args map[string]any) ToolCallResult {
 		filter.TraceID = v
 	}
 
-	logs, total, err := s.repo.GetLogsV2(filter)
+	logs, total, err := s.repo.GetLogsV2(mcpCtx(ctx), filter)
 	if err != nil {
 		return errorResult(fmt.Sprintf("search_logs failed: %v", err))
 	}
@@ -429,7 +444,7 @@ func (s *Server) toolSearchLogs(args map[string]any) ToolCallResult {
 	return resourceResult("OtelContext://logs/search", "application/json", string(data))
 }
 
-func (s *Server) toolTailLogs(args map[string]any) ToolCallResult {
+func (s *Server) toolTailLogs(ctx context.Context, args map[string]any) ToolCallResult {
 	limit := argInt(args, "limit", 20)
 	if limit > 100 {
 		limit = 100
@@ -446,7 +461,7 @@ func (s *Server) toolTailLogs(args map[string]any) ToolCallResult {
 		filter.Severity = v
 	}
 
-	logs, _, err := s.repo.GetLogsV2(filter)
+	logs, _, err := s.repo.GetLogsV2(mcpCtx(ctx), filter)
 	if err != nil {
 		return errorResult(fmt.Sprintf("tail_logs failed: %v", err))
 	}
@@ -457,12 +472,12 @@ func (s *Server) toolTailLogs(args map[string]any) ToolCallResult {
 	return resourceResult("OtelContext://logs/tail", "application/json", string(data))
 }
 
-func (s *Server) toolGetTrace(args map[string]any) ToolCallResult {
+func (s *Server) toolGetTrace(ctx context.Context, args map[string]any) ToolCallResult {
 	traceID, _ := args["trace_id"].(string)
 	if traceID == "" {
 		return errorResult("trace_id is required")
 	}
-	trace, err := s.repo.GetTrace(traceID)
+	trace, err := s.repo.GetTrace(mcpCtx(ctx), traceID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("get_trace failed: %v", err))
 	}
@@ -473,7 +488,7 @@ func (s *Server) toolGetTrace(args map[string]any) ToolCallResult {
 	return resourceResult("OtelContext://traces/"+traceID, "application/json", string(data))
 }
 
-func (s *Server) toolSearchTraces(args map[string]any) ToolCallResult {
+func (s *Server) toolSearchTraces(ctx context.Context, args map[string]any) ToolCallResult {
 	end := time.Now()
 	start := end.Add(-1 * time.Hour)
 	parseTime(args, "start", &start)
@@ -493,7 +508,7 @@ func (s *Server) toolSearchTraces(args map[string]any) ToolCallResult {
 		services = []string{svcName}
 	}
 
-	resp, err := s.repo.GetTracesFiltered(start, end, services, status, search, limit, 0, "timestamp", "desc")
+	resp, err := s.repo.GetTracesFiltered(mcpCtx(ctx), start, end, services, status, search, limit, 0, "timestamp", "desc")
 	if err != nil {
 		return errorResult(fmt.Sprintf("search_traces failed: %v", err))
 	}
@@ -504,7 +519,7 @@ func (s *Server) toolSearchTraces(args map[string]any) ToolCallResult {
 	return resourceResult("OtelContext://traces/search", "application/json", string(data))
 }
 
-func (s *Server) toolGetMetrics(args map[string]any) ToolCallResult {
+func (s *Server) toolGetMetrics(ctx context.Context, args map[string]any) ToolCallResult {
 	end := time.Now()
 	start := end.Add(-1 * time.Hour)
 	parseTime(args, "start", &start)
@@ -513,7 +528,7 @@ func (s *Server) toolGetMetrics(args map[string]any) ToolCallResult {
 	metricName, _ := args["name"].(string)
 	svcName, _ := args["service"].(string)
 
-	buckets, err := s.repo.GetMetricBuckets(start, end, svcName, metricName)
+	buckets, err := s.repo.GetMetricBuckets(mcpCtx(ctx), start, end, svcName, metricName)
 	if err != nil {
 		return errorResult(fmt.Sprintf("get_metrics failed: %v", err))
 	}
@@ -524,13 +539,13 @@ func (s *Server) toolGetMetrics(args map[string]any) ToolCallResult {
 	return resourceResult("OtelContext://metrics/query", "application/json", string(data))
 }
 
-func (s *Server) toolGetDashboardStats(args map[string]any) ToolCallResult {
+func (s *Server) toolGetDashboardStats(ctx context.Context, args map[string]any) ToolCallResult {
 	end := time.Now()
 	start := end.Add(-1 * time.Hour)
 	parseTime(args, "start", &start)
 	parseTime(args, "end", &end)
 
-	stats, err := s.repo.GetDashboardStats(start, end, nil)
+	stats, err := s.repo.GetDashboardStats(mcpCtx(ctx), start, end, nil)
 	if err != nil {
 		return errorResult(fmt.Sprintf("get_dashboard_stats failed: %v", err))
 	}
@@ -612,27 +627,6 @@ func (s *Server) toolGetAlerts() ToolCallResult {
 	return textResult(string(data))
 }
 
-func (s *Server) toolSearchColdArchive(args map[string]any) ToolCallResult {
-	dataType, _ := args["type"].(string)
-	startStr, _ := args["start"].(string)
-	endStr, _ := args["end"].(string)
-	if dataType == "" || startStr == "" || endStr == "" {
-		return errorResult("type, start, and end are required")
-	}
-	result := map[string]any{
-		"source":  "cold",
-		"type":    dataType,
-		"start":   startStr,
-		"end":     endStr,
-		"message": "Cold archive data is available. Query the /api/archive/search endpoint for full streaming results.",
-	}
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return errorResult(fmt.Sprintf("failed to marshal cold archive result: %v", err))
-	}
-	return textResult(string(data))
-}
-
 // --- GraphRAG Tool implementations ---
 
 func (s *Server) toolGetServiceMap(args map[string]any) ToolCallResult {
@@ -668,7 +662,7 @@ func (s *Server) toolGetErrorChains(args map[string]any) ToolCallResult {
 	return textResult(string(data))
 }
 
-func (s *Server) toolTraceGraph(args map[string]any) ToolCallResult {
+func (s *Server) toolTraceGraph(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
 		return errorResult("GraphRAG not initialized")
 	}
@@ -679,7 +673,7 @@ func (s *Server) toolTraceGraph(args map[string]any) ToolCallResult {
 	spans := s.graphRAG.DependencyChain(traceID)
 	if len(spans) == 0 {
 		// Fallback to DB
-		trace, err := s.repo.GetTrace(traceID)
+		trace, err := s.repo.GetTrace(mcpCtx(ctx), traceID)
 		if err != nil {
 			return errorResult(fmt.Sprintf("trace not found: %v", err))
 		}
@@ -877,5 +871,3 @@ func argInt(args map[string]any, key string, def int) int {
 	}
 	return def
 }
-
-

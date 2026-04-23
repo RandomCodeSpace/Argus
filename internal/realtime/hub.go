@@ -27,17 +27,17 @@ type LogEntry struct {
 
 // MetricEntry represents a raw metric point for real-time visualization.
 type MetricEntry struct {
-	Name        string                 `json:"name"`
-	ServiceName string                 `json:"service_name"`
-	Value       float64                `json:"value"`
-	Timestamp   time.Time              `json:"timestamp"`
-	Attributes  map[string]interface{} `json:"attributes"`
+	Name        string         `json:"name"`
+	ServiceName string         `json:"service_name"`
+	Value       float64        `json:"value"`
+	Timestamp   time.Time      `json:"timestamp"`
+	Attributes  map[string]any `json:"attributes"`
 }
 
 // HubBatch is a unified payload for WebSocket broadcasts.
 type HubBatch struct {
-	Type string      `json:"type"` // "logs" or "metrics"
-	Data interface{} `json:"data"` // Slice of entries
+	Type string `json:"type"` // "logs" or "metrics"
+	Data any    `json:"data"` // Slice of entries
 }
 
 // Hub is a buffered WebSocket broadcast hub.
@@ -70,7 +70,7 @@ type Hub struct {
 
 	// Metric callbacks (optional)
 	onMessageSent    func(msgType string) // WSMessagesSent.WithLabelValues(type).Inc()
-	onSlowClientDrop func()              // WSSlowClientsRemoved.Inc()
+	onSlowClientDrop func()               // WSSlowClientsRemoved.Inc()
 
 	logPool    sync.Pool
 	metricPool sync.Pool
@@ -97,10 +97,10 @@ func NewHub(onConnectionChange func(count int)) *Hub {
 		onConnectionChange: onConnectionChange,
 	}
 
-	h.logPool.New = func() interface{} {
+	h.logPool.New = func() any {
 		return make([]LogEntry, 0, h.maxBufferSize)
 	}
-	h.metricPool.New = func() interface{} {
+	h.metricPool.New = func() any {
 		return make([]MetricEntry, 0, h.maxBufferSize)
 	}
 
@@ -190,7 +190,7 @@ func (h *Hub) flush() {
 		h.broadcastBatch(HubBatch{Type: "logs", Data: logBatch})
 		// Recycle logBatch
 		logBatch = logBatch[:0]
-		h.logPool.Put(logBatch)
+		h.logPool.Put(logBatch) //nolint:staticcheck // SA6002: []T pool; pointer wrap would require broader refactor
 	}
 
 	// Broadcast Metrics if any
@@ -198,7 +198,7 @@ func (h *Hub) flush() {
 		h.broadcastBatch(HubBatch{Type: "metrics", Data: metricBatch})
 		// Recycle metricBatch
 		metricBatch = metricBatch[:0]
-		h.metricPool.Put(metricBatch)
+		h.metricPool.Put(metricBatch) //nolint:staticcheck // SA6002: []T pool; pointer wrap would require broader refactor
 	}
 }
 
@@ -295,18 +295,16 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Writer goroutine
 	h.writerWg.Add(1)
-	go func() {
+	go func() { // #nosec G118 -- long-lived WS writer goroutine outlives HTTP request intentionally
 		defer h.writerWg.Done()
 		defer func() {
 			if !h.stopped.Load() {
 				h.unregister <- c
-			} else {
+			} else if c.closed.CompareAndSwap(false, true) {
 				// Hub already stopped; clean up directly.
-				if c.closed.CompareAndSwap(false, true) {
-					close(c.send)
-				}
+				close(c.send)
 			}
-			conn.Close(websocket.StatusNormalClosure, "closing")
+			_ = conn.Close(websocket.StatusNormalClosure, "closing")
 		}()
 
 		for msg := range c.send {

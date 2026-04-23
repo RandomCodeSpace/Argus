@@ -16,7 +16,7 @@ export function useTraces() {
       setTraces(data.traces ?? [])
       if (data.traces?.[0]) {
         const detail = await fetch(`/api/traces/${data.traces[0].trace_id}`)
-        setSelected(await detail.json())
+        setSelected((await detail.json()) as Trace)
       }
     } catch (e) {
       setError(String(e))
@@ -29,7 +29,7 @@ export function useTraces() {
 
   const selectTrace = async (traceId: string) => {
     const res = await fetch(`/api/traces/${traceId}`)
-    setSelected(await res.json())
+    setSelected((await res.json()) as Trace)
   }
 
   return { traces, selected, loading, error, selectTrace, reload: load }

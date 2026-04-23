@@ -33,7 +33,7 @@ func (s *Server) handleGetSimilarLogs(w http.ResponseWriter, r *http.Request) {
 	results := s.vectorIdx.Search(query, limit)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"query":   query,
 		"count":   len(results),
 		"results": results,

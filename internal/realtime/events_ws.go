@@ -157,7 +157,7 @@ func (h *EventHub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.removeClient(conn)
-	conn.Close(websocket.StatusNormalClosure, "bye")
+	_ = conn.Close(websocket.StatusNormalClosure, "bye")
 }
 
 func (h *EventHub) addClient(c *websocket.Conn, service string) {
@@ -213,7 +213,7 @@ func (h *EventHub) flushSnapshots() {
 	var snapMu sync.Mutex
 
 	for service := range groups {
-		service := service // Capture
+		// Capture
 		g.Go(func() error {
 			snap := h.computeSnapshot(service)
 			if snap != nil {
@@ -247,7 +247,7 @@ func (h *EventHub) flushSnapshots() {
 			if err := conn.Write(writeCtx, websocket.MessageText, msg); err != nil {
 				slog.Debug("Event WS send failed, removing client", "error", err)
 				h.removeClient(conn)
-				conn.Close(websocket.StatusGoingAway, "write error")
+				_ = conn.Close(websocket.StatusGoingAway, "write error")
 			}
 			cancel()
 		}
@@ -298,13 +298,13 @@ func (h *EventHub) flushBatches() {
 	}
 }
 
-func (h *EventHub) sendBatch(conn *websocket.Conn, batchType string, data interface{}) {
+func (h *EventHub) sendBatch(conn *websocket.Conn, batchType string, data any) {
 	msg, _ := json.Marshal(HubBatch{Type: batchType, Data: data})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
 		h.removeClient(conn)
-		conn.Close(websocket.StatusGoingAway, "write error")
+		_ = conn.Close(websocket.StatusGoingAway, "write error")
 	}
 }
 
@@ -320,7 +320,7 @@ func (h *EventHub) sendSnapshotTo(conn *websocket.Conn, service string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	conn.Write(ctx, websocket.MessageText, msg)
+	_ = conn.Write(ctx, websocket.MessageText, msg)
 }
 
 // computeSnapshot queries the DB for the last 15 minutes of data,
@@ -336,19 +336,24 @@ func (h *EventHub) computeSnapshot(service string) *LiveSnapshot {
 
 	snapshot := &LiveSnapshot{Type: "live_snapshot"}
 
-	if stats, err := h.repo.GetDashboardStats(start, now, serviceNames); err == nil {
+	// WebSocket snapshots are not tenant-scoped in the current protocol;
+	// use the default-tenant context so repo query helpers behave the same as
+	// a single-tenant install.
+	ctx := context.Background()
+
+	if stats, err := h.repo.GetDashboardStats(ctx, start, now, serviceNames); err == nil {
 		snapshot.Dashboard = stats
 	}
 
-	if traffic, err := h.repo.GetTrafficMetrics(start, now, serviceNames); err == nil {
+	if traffic, err := h.repo.GetTrafficMetrics(ctx, start, now, serviceNames); err == nil {
 		snapshot.Traffic = traffic
 	}
 
-	if traces, err := h.repo.GetTracesFiltered(start, now, serviceNames, "", "", 25, 0, "timestamp", "desc"); err == nil {
+	if traces, err := h.repo.GetTracesFiltered(ctx, start, now, serviceNames, "", "", 25, 0, "timestamp", "desc"); err == nil {
 		snapshot.Traces = traces
 	}
 
-	if smap, err := h.repo.GetServiceMapMetrics(start, now); err == nil {
+	if smap, err := h.repo.GetServiceMapMetrics(ctx, start, now); err == nil {
 		snapshot.ServiceMap = smap
 	}
 
@@ -360,4 +365,3 @@ func (h *EventHub) Stop() {
 		close(h.stopCh)
 	})
 }
-

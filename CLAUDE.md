@@ -24,13 +24,13 @@ gRPC :4317 (OTLP Ingest) ──► Ingestion Layer ──► Storage (GORM)
 HTTP :8080/v1/* (OTLP HTTP)─┘       │                    │
                                      ▼                    ▼
                                In-Memory Accel.      Relational DB
-                               (TSDB Ring,           (Source of Truth)
-                                GraphRAG,                  │
-                                Vector)                    ▼
-                                     │              Cold Archive
-HTTP :8080 ◄── REST API ◄───────────┘              (zstd JSONL)
+                               (TSDB Ring,           (Source of Truth,
+                                GraphRAG,             7-15 day retention)
+                                Vector)
+                                     │
+HTTP :8080 ◄── REST API ◄───────────┘
            ◄── WebSocket (real-time)
-           ◄── MCP Server (AI agents, 22 tools)
+           ◄── MCP Server (AI agents, 21 tools)
            ◄── Prometheus /metrics
 ```
 
@@ -43,6 +43,15 @@ HTTP :8080 ◄── REST API ◄───────────┘           
 
 Both paths delegate to the same `Export()` methods — zero business logic duplication.
 
+### Multi-tenancy
+
+Tenant identity flows into the request context on every write and read:
+- **HTTP:** `X-Tenant-ID` header (see `internal/api/tenant_middleware.go`).
+- **gRPC:** `x-tenant-id` metadata key (see `internal/ingest/otlp.go`).
+- **OTLP resource attribute:** `tenant.id` on the resource overrides the header/metadata.
+
+When none are present, `DEFAULT_TENANT` (default `"default"`) is assigned. Every row in the relational DB carries a `tenant_id` column; every read method in `internal/storage/` scopes by the tenant in the request context (`Where("tenant_id = ?", tenant)`). Retention (`RetentionScheduler`) is **cross-tenant** — it purges by age, not by tenant.
+
 ## Storage Architecture
 
 | Layer | Package | Purpose |
@@ -50,9 +59,8 @@ Both paths delegate to the same `Export()` methods — zero business logic dupli
 | GraphRAG (in-memory) | `internal/graphrag/` | Layered graph: 4 typed stores, error chains, root cause analysis, anomaly detection |
 | Time Series (in-memory) | `internal/tsdb/` | Ring buffer, sliding windows, pre-computed percentiles |
 | Graph (in-memory, legacy) | `internal/graph/` | Simple service topology — **being replaced by GraphRAG** |
-| Vector (embedded) | `internal/vectordb/` | TF-IDF index for semantic log search (pure Go, no CGO) |
-| Relational (persistent) | `internal/storage/` | GORM-based, multi-DB, single source of truth |
-| Cold Archive | `internal/archive/` | Zstd-compressed JSONL on local disk (7+ day old data) |
+| Vector (embedded) | `internal/vectordb/` | TF-IDF index for semantic log search (pure Go, no CGO). Retained as a fallback similarity index for SQLite mode and for `SimilarErrors` ranking within a Drain template cluster. |
+| Relational (persistent) | `internal/storage/` | GORM-based, multi-DB, single source of truth. Driven by `RetentionScheduler` (hourly batched purge + daily VACUUM/ANALYZE). `logs.body` is plain TEXT (Postgres: `pg_trgm` GIN indexed for substring search); `AttributesJSON` and `AIInsight` remain `CompressedText`. |
 
 ## GraphRAG Architecture
 
@@ -95,6 +103,11 @@ The `internal/graphrag/` package is the core intelligence layer. It replaces the
 ### Persistence Models (GORM)
 - `Investigation` — automated error analysis records (trigger, root cause, causal chain, evidence)
 - `GraphSnapshot` — periodic topology snapshots (nodes, edges, health scores)
+- `DrainTemplateRow` — persisted Drain log templates (table `drain_templates`), loaded on startup to warm the miner
+
+### Log Clustering (Drain)
+
+Log clustering uses **Drain** template mining (`internal/graphrag/drain.go`) — a deterministic fixed-depth prefix tree with O(1) LRU via `container/list`. It replaces the older hash-based clustering. Templates are persisted to the `drain_templates` table and reloaded on startup so cluster IDs stay stable across restarts. The TF-IDF `vectordb` is retained as a fallback similarity ranker inside a template bucket (`SimilarErrors`).
 
 ### Ingestion Callbacks
 ```
@@ -103,12 +116,12 @@ LogsServer.Export()  → DB persist → logCallback  → GraphRAG.OnLogIngested(
 MetricsServer.Export() → TSDB    → metricCallback → GraphRAG.OnMetricIngested()
 ```
 
-## MCP Server — 22 Tools
+## MCP Server — 21 Tools
 
 The MCP server (`internal/mcp/`) exposes tools via HTTP Streamable MCP (JSON-RPC 2.0 POST + SSE GET).
 
-### Legacy Tools (12)
-`get_system_graph`, `get_service_health`, `search_logs`, `tail_logs`, `get_trace`, `search_traces`, `get_metrics`, `get_dashboard_stats`, `get_storage_status`, `find_similar_logs`, `get_alerts`, `search_cold_archive`
+### Legacy Tools (11)
+`get_system_graph`, `get_service_health`, `search_logs`, `tail_logs`, `get_trace`, `search_traces`, `get_metrics`, `get_dashboard_stats`, `get_storage_status`, `find_similar_logs`, `get_alerts`
 
 ### GraphRAG Tools (10)
 | Tool | Input | Source |
@@ -142,9 +155,10 @@ Legacy format (raw `[]storage.Log` JSON) is supported for backward compatibility
 Proper LIFO ordering to prevent data loss:
 1. gRPC `GracefulStop()` + HTTP `Shutdown()` — stop ingestion
 2. WebSocket Hub + Event Hub + AI Service — stop real-time
-3. TSDB + Archiver + Graph + GraphRAG — stop processing
+3. TSDB + Graph + GraphRAG — stop processing
 4. DLQ — stop replay
-5. DB `Close()` — close database last
+5. RetentionScheduler `Stop()` — halt purge/maintenance ticks
+6. DB `Close()` — close database last
 
 ## Key Directories
 
@@ -152,7 +166,6 @@ Proper LIFO ordering to prevent data loss:
 internal/
   ai/           # AI service integration
   api/          # HTTP handlers, middleware, rate limiting, graph_handler
-  archive/      # Hot/cold storage archival
   cache/        # TTL cache with synchronized Stop()
   compress/     # Zstd compression utilities
   config/       # Environment configuration (40+ fields)
@@ -165,13 +178,13 @@ internal/
     investigation.go # GORM Investigation model + persistence
     snapshot.go     # GORM GraphSnapshot model + scheduler
     anomaly.go      # Z-score, error spike, latency degradation detection
-    clustering.go   # Log clustering via hash + vectordb similarity
+    drain.go        # Log clustering via Drain template mining — pure-Go, stdlib-only, deterministic fixed-depth prefix tree
     refresh.go      # Periodic DB rebuild + pruning
   ingest/       # OTLP receivers (gRPC + HTTP), adaptive sampling
     otlp.go         # gRPC TraceServer, LogsServer, MetricsServer
     otlp_http.go    # HTTP OTLP handler (protobuf + JSON, gzip, 4MB limit)
     sampler.go      # Per-service token bucket sampler
-  mcp/          # MCP server (22 tools, JSON-RPC 2.0 + SSE)
+  mcp/          # MCP server (21 tools, JSON-RPC 2.0 + SSE)
   queue/        # Dead Letter Queue (typed envelopes, bounded disk, exp backoff)
   realtime/     # WebSocket hub + event streaming
   storage/      # GORM repository, models, migrations, Close() method
@@ -188,12 +201,34 @@ docs/           # Specifications and plans
 
 Key settings in `internal/config/config.go`:
 - `HTTP_PORT` (8080), `GRPC_PORT` (4317), `DB_DRIVER` (sqlite), `DB_DSN`
-- `HOT_RETENTION_DAYS` (7), `COLD_STORAGE_PATH`, `ARCHIVE_SCHEDULE_HOUR`
+- `DB_AUTOMIGRATE` (true), `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME` (internally capped to 30m when `DB_AZURE_AUTH=true`)
+- `DB_AZURE_AUTH` (false) — see Authentication below
+- `TLS_CERT_FILE`, `TLS_KEY_FILE` — explicit TLS (both or neither)
+- `TLS_AUTO_SELFSIGNED` (false), `TLS_CACHE_DIR` (`./data/tls`) — self-signed bootstrap, ignored if cert files set
+- `API_KEY` — Bearer token gate for `/api/*`, `/v1/*`, `/mcp`. Empty = auth disabled
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — enables self-instrumentation (empty = off)
+- `DEFAULT_TENANT` (`default`) — assigned to rows ingested without explicit tenant
+- `HOT_RETENTION_DAYS` (7) — drives `RetentionScheduler`; range 1..36500
 - `SAMPLING_RATE` (1.0), `SAMPLING_ALWAYS_ON_ERRORS` (true), `SAMPLING_LATENCY_THRESHOLD_MS` (500)
 - `METRIC_MAX_CARDINALITY` (10000), `API_RATE_LIMIT_RPS` (100)
 - `MCP_ENABLED` (true), `MCP_PATH` (/mcp)
 - `VECTOR_INDEX_MAX_ENTRIES` (100000)
 - `DLQ_MAX_FILES` (1000), `DLQ_MAX_DISK_MB` (500), `DLQ_MAX_RETRIES` (10)
+
+### Authentication
+
+**API auth (platform).** `API_KEY` gates `/api/*`, OTLP HTTP (`/v1/*`), and the MCP endpoint via `Authorization: Bearer <API_KEY>`. When empty, the middleware is a pass-through (dev only). Unprotected paths: `/live`, `/ready`, `/metrics*`, `/ws*`. A shared `API_KEY` grants access to every tenant — there is no per-tenant-key file in the current code; isolate tenants at the network/auth layer if that matters. (If an `API_TENANT_KEYS_FILE` override lands later, re-check `internal/api/auth.go` for the flag name.)
+
+**Database auth (Azure Entra).** Setting `DB_AZURE_AUTH=true` enables Azure Entra ID (AAD) authentication for PostgreSQL. The driver uses `DefaultAzureCredential`, which resolves identity via the standard probe order (env vars → workload identity → managed identity → Azure CLI → developer credentials). When Azure auth is enabled, strict TLS (`sslmode=require`, `verify-ca`, or `verify-full`) is mandatory; weaker modes are rejected at startup. `DB_CONN_MAX_LIFETIME` is internally capped to 30 minutes to stay inside the token TTL.
+
+### Retention & Maintenance
+
+The `RetentionScheduler` in `internal/storage/` runs an hourly batched purge of data older than `HOT_RETENTION_DAYS` via `PurgeLogsBatched`, `PurgeTracesBatched`, and `PurgeMetricBucketsBatched`, plus a daily `VACUUM`/`ANALYZE` pass to reclaim space and refresh planner statistics. Purge is **cross-tenant** — it scopes by age, not `tenant_id`. Valid `HOT_RETENTION_DAYS` is clamped to the range 1..36500.
+
+Failure-mode gauges (prefix `OtelContext_`):
+- `retention_consecutive_failures` — reset to 0 on success; alert when > 3
+- `retention_last_success_timestamp` — Unix seconds; alert when stale relative to the hourly tick
+- `retention_rows_purged_total`, `retention_purge_duration_seconds`, `retention_vacuum_duration_seconds` — throughput and latency
 
 ## Build & Run
 

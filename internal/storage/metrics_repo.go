@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -55,10 +56,12 @@ func (r *Repository) BatchCreateMetrics(buckets []MetricBucket) error {
 	return nil
 }
 
-// GetMetricBuckets returns aggregated metrics for a specific time range and service.
-func (r *Repository) GetMetricBuckets(start, end time.Time, serviceName string, metricName string) ([]MetricBucket, error) {
+// GetMetricBuckets returns aggregated metrics for a specific time range and service,
+// scoped to the tenant on ctx.
+func (r *Repository) GetMetricBuckets(ctx context.Context, start, end time.Time, serviceName string, metricName string) ([]MetricBucket, error) {
+	tenant := TenantFromContext(ctx)
 	var buckets []MetricBucket
-	query := r.db.Where("time_bucket BETWEEN ? AND ?", start, end)
+	query := r.db.WithContext(ctx).Where("tenant_id = ? AND time_bucket BETWEEN ? AND ?", tenant, start, end)
 	if serviceName != "" {
 		query = query.Where("service_name = ?", serviceName)
 	}
@@ -71,10 +74,12 @@ func (r *Repository) GetMetricBuckets(start, end time.Time, serviceName string, 
 	return buckets, nil
 }
 
-// GetMetricNames returns a list of distinct metric names, optionally filtered by service.
-func (r *Repository) GetMetricNames(serviceName string) ([]string, error) {
+// GetMetricNames returns a list of distinct metric names for the tenant on ctx,
+// optionally filtered by service.
+func (r *Repository) GetMetricNames(ctx context.Context, serviceName string) ([]string, error) {
+	tenant := TenantFromContext(ctx)
 	var names []string
-	query := r.db.Model(&MetricBucket{})
+	query := r.db.WithContext(ctx).Model(&MetricBucket{}).Where("tenant_id = ?", tenant)
 	if serviceName != "" {
 		query = query.Where("service_name = ?", serviceName)
 	}
@@ -84,11 +89,13 @@ func (r *Repository) GetMetricNames(serviceName string) ([]string, error) {
 	return names, nil
 }
 
-// GetDashboardStats calculates high-level metrics for the dashboard.
-func (r *Repository) GetDashboardStats(start, end time.Time, serviceNames []string) (*DashboardStats, error) {
+// GetDashboardStats calculates high-level metrics for the dashboard, scoped to
+// the tenant on ctx.
+func (r *Repository) GetDashboardStats(ctx context.Context, start, end time.Time, serviceNames []string) (*DashboardStats, error) {
+	tenant := TenantFromContext(ctx)
 	var stats DashboardStats
 
-	baseQuery := r.db.Model(&Trace{}).Where("timestamp BETWEEN ? AND ?", start, end)
+	baseQuery := r.db.WithContext(ctx).Model(&Trace{}).Where("tenant_id = ? AND timestamp BETWEEN ? AND ?", tenant, start, end)
 	if len(serviceNames) > 0 {
 		baseQuery = baseQuery.Where("service_name IN ?", serviceNames)
 	}
@@ -99,7 +106,7 @@ func (r *Repository) GetDashboardStats(start, end time.Time, serviceNames []stri
 	}
 
 	// 2. Total Logs
-	logQuery := r.db.Model(&Log{}).Where("timestamp BETWEEN ? AND ?", start, end)
+	logQuery := r.db.WithContext(ctx).Model(&Log{}).Where("tenant_id = ? AND timestamp BETWEEN ? AND ?", tenant, start, end)
 	if len(serviceNames) > 0 {
 		logQuery = logQuery.Where("service_name IN ?", serviceNames)
 	}
@@ -108,8 +115,9 @@ func (r *Repository) GetDashboardStats(start, end time.Time, serviceNames []stri
 	}
 
 	// 3. Total Errors (traces with error status)
+	op := r.likeOp()
 	if err := baseQuery.Session(&gorm.Session{}).
-		Where("status LIKE ?", "%ERROR%").
+		Where(fmt.Sprintf("status %s ?", op), "%ERROR%").
 		Count(&stats.TotalErrors).Error; err != nil {
 		return nil, fmt.Errorf("failed to count error traces: %w", err)
 	}
@@ -165,7 +173,7 @@ func (r *Repository) GetDashboardStats(start, end time.Time, serviceNames []stri
 	}
 	var svcCounts []svcCount
 	if err := baseQuery.Session(&gorm.Session{}).
-		Select("service_name, COUNT(*) as total_count, SUM(CASE WHEN status LIKE '%ERROR%' THEN 1 ELSE 0 END) as error_count").
+		Select(fmt.Sprintf("service_name, COUNT(*) as total_count, SUM(CASE WHEN status %s '%%ERROR%%' THEN 1 ELSE 0 END) as error_count", op)).
 		Group("service_name").
 		Having("error_count > 0").
 		Order("error_count DESC").
@@ -190,8 +198,10 @@ func (r *Repository) GetDashboardStats(start, end time.Time, serviceNames []stri
 	return &stats, nil
 }
 
-// GetTrafficMetrics returns request counts bucketed by minute, including error counts.
-func (r *Repository) GetTrafficMetrics(start, end time.Time, serviceNames []string) ([]TrafficPoint, error) {
+// GetTrafficMetrics returns request counts bucketed by minute (including error
+// counts), scoped to the tenant on ctx.
+func (r *Repository) GetTrafficMetrics(ctx context.Context, start, end time.Time, serviceNames []string) ([]TrafficPoint, error) {
+	tenant := TenantFromContext(ctx)
 	var points []TrafficPoint
 
 	type traceRow struct {
@@ -200,9 +210,9 @@ func (r *Repository) GetTrafficMetrics(start, end time.Time, serviceNames []stri
 	}
 	var rows []traceRow
 
-	query := r.db.Model(&Trace{}).
+	query := r.db.WithContext(ctx).Model(&Trace{}).
 		Select("timestamp, status").
-		Where("timestamp BETWEEN ? AND ?", start, end)
+		Where("tenant_id = ? AND timestamp BETWEEN ? AND ?", tenant, start, end)
 
 	if len(serviceNames) > 0 {
 		query = query.Where("service_name IN ?", serviceNames)
@@ -245,12 +255,14 @@ func (r *Repository) GetTrafficMetrics(start, end time.Time, serviceNames []stri
 	return points, nil
 }
 
-// GetLatencyHeatmap returns trace duration and timestamps for heatmap rendering.
-func (r *Repository) GetLatencyHeatmap(start, end time.Time, serviceNames []string) ([]LatencyPoint, error) {
+// GetLatencyHeatmap returns trace duration and timestamps for heatmap rendering,
+// scoped to the tenant on ctx.
+func (r *Repository) GetLatencyHeatmap(ctx context.Context, start, end time.Time, serviceNames []string) ([]LatencyPoint, error) {
+	tenant := TenantFromContext(ctx)
 	var points []LatencyPoint
-	query := r.db.Model(&Trace{}).
+	query := r.db.WithContext(ctx).Model(&Trace{}).
 		Select("timestamp, duration").
-		Where("timestamp BETWEEN ? AND ?", start, end)
+		Where("tenant_id = ? AND timestamp BETWEEN ? AND ?", tenant, start, end)
 
 	if len(serviceNames) > 0 {
 		query = query.Where("service_name IN ?", serviceNames)
@@ -262,10 +274,55 @@ func (r *Repository) GetLatencyHeatmap(start, end time.Time, serviceNames []stri
 	return points, nil
 }
 
-// GetServices returns a list of all distinct service names seen in traces.
-func (r *Repository) GetServices() ([]string, error) {
+// PurgeMetricBucketsBatched deletes metric buckets older than the given timestamp in bounded chunks.
+//
+// Tenant scope: this is a SYSTEM-WIDE retention operation and intentionally
+// does NOT filter by tenant. Rows are deleted across every tenant. Never expose
+// this on a tenant-scoped API surface.
+func (r *Repository) PurgeMetricBucketsBatched(ctx context.Context, olderThan time.Time, batchSize int) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = 10_000
+	}
+	driver := strings.ToLower(r.driver)
+	if driver == "sqlite" || driver == "" {
+		result := r.db.WithContext(ctx).Where("time_bucket < ?", olderThan).Delete(&MetricBucket{})
+		return result.RowsAffected, result.Error
+	}
+
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		result := r.db.WithContext(ctx).Exec(
+			"DELETE FROM metric_buckets WHERE id IN (SELECT id FROM metric_buckets WHERE time_bucket < ? ORDER BY id LIMIT ?)",
+			olderThan, batchSize,
+		)
+		if result.Error != nil {
+			return total, fmt.Errorf("batched purge metric_buckets: %w", result.Error)
+		}
+		total += result.RowsAffected
+		if result.RowsAffected < int64(batchSize) {
+			return total, nil
+		}
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// GetServices returns a list of all distinct service names seen in traces for
+// the tenant on ctx.
+func (r *Repository) GetServices(ctx context.Context) ([]string, error) {
+	tenant := TenantFromContext(ctx)
 	var services []string
-	if err := r.db.Model(&Trace{}).Distinct("service_name").Order("service_name ASC").Pluck("service_name", &services).Error; err != nil {
+	if err := r.db.WithContext(ctx).Model(&Trace{}).
+		Where("tenant_id = ?", tenant).
+		Distinct("service_name").
+		Order("service_name ASC").
+		Pluck("service_name", &services).Error; err != nil {
 		return nil, fmt.Errorf("failed to get services: %w", err)
 	}
 	return services, nil

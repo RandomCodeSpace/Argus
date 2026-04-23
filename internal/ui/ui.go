@@ -96,7 +96,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) error {
 		// Try the file as-is; if not found, fall back to index.html (SPA routing).
 		f, openErr := distFS.Open(strings.TrimPrefix(r.URL.Path, "/"))
 		if openErr == nil {
-			f.Close()
+			_ = f.Close()
 			fileServer.ServeHTTP(w, r)
 			return
 		}
@@ -107,116 +107,4 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) error {
 	})
 
 	return nil
-}
-
-func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-
-	traces, _ := s.repo.RecentTraces(10)
-	stats, _ := s.repo.GetStats()
-	health := s.metrics.GetHealthStats()
-
-	err := s.tmpl.ExecuteTemplate(w, "dashboard.html", map[string]any{
-		"Title":       "Dashboard - OtelContext",
-		"Traces":      traces,
-		"Stats":       stats,
-		"HealthStats": health,
-		"MCPPath":     s.mcpPath,
-		"MCPEnabled":  s.mcpEnabled,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
-	limit := 100
-
-	var logs []storage.Log
-	var err error
-
-	if query != "" {
-		logs, err = s.repo.SearchLogs(query, limit)
-	} else {
-		logs, err = s.repo.RecentLogs(limit)
-	}
-
-	if err != nil {
-		http.Error(w, "Failed to load logs: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	err = s.tmpl.ExecuteTemplate(w, "logs.html", map[string]any{
-		"Title": "Logs - OtelContext",
-		"Logs":  logs,
-		"Query": query,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (s *Server) handleTraces(w http.ResponseWriter, r *http.Request) {
-	traces, err := s.repo.RecentTraces(50)
-	if err != nil {
-		http.Error(w, "Failed to load traces: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	err = s.tmpl.ExecuteTemplate(w, "traces.html", map[string]any{
-		"Title":  "Traces - OtelContext",
-		"Traces": traces,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
-	traceID := strings.TrimPrefix(r.URL.Path, "/traces/")
-	if traceID == "" {
-		http.Redirect(w, r, "/traces", http.StatusFound)
-		return
-	}
-
-	trace, err := s.repo.GetTrace(traceID)
-	if err != nil {
-		http.Error(w, "Trace not found", http.StatusNotFound)
-		return
-	}
-
-	err = s.tmpl.ExecuteTemplate(w, "trace_detail.html", map[string]any{
-		"Title": "Trace: " + traceID + " - OtelContext",
-		"Trace": trace,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
-	nodes := s.topo.GetNodes()
-
-	err := s.tmpl.ExecuteTemplate(w, "services.html", map[string]any{
-		"Title": "Services - OtelContext",
-		"Nodes": nodes,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (s *Server) handleMCPConsole(w http.ResponseWriter, r *http.Request) {
-	err := s.tmpl.ExecuteTemplate(w, "mcp_console.html", map[string]any{
-		"Title":      "MCP Console - OtelContext",
-		"MCPPath":    s.mcpPath,
-		"MCPEnabled": s.mcpEnabled,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
 }

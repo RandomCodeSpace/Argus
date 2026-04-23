@@ -23,7 +23,6 @@ type Server struct {
 	graph     *graph.Graph       // in-memory service dependency graph (may be nil before first build)
 	graphRAG  *graphrag.GraphRAG // layered GraphRAG for advanced queries
 	vectorIdx *vectordb.Index    // TF-IDF semantic log search index
-	coldPath  string             // cold storage base path for archive search
 }
 
 // NewServer creates a new API server.
@@ -52,11 +51,6 @@ func (s *Server) SetVectorIndex(idx *vectordb.Index) {
 	s.vectorIdx = idx
 }
 
-// SetColdStoragePath sets the base path for cold archive search.
-func (s *Server) SetColdStoragePath(path string) {
-	s.coldPath = path
-}
-
 // RegisterRoutes registers API endpoints on the provided mux.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Metadata & Discovery
@@ -73,9 +67,6 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// System Graph (AI-consumable topology + health)
 	mux.HandleFunc("GET /api/system/graph", s.handleGetSystemGraph)
 
-	// Archive search (cold storage)
-	mux.HandleFunc("GET /api/archive/search", s.handleSearchColdArchive)
-
 	// Traces
 	mux.HandleFunc("GET /api/traces", s.handleGetTraces)
 	mux.HandleFunc("GET /api/traces/{id}", s.handleGetTraceByID)
@@ -89,6 +80,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Admin & System
 	mux.HandleFunc("GET /api/stats", s.handleGetStats)
 	mux.HandleFunc("GET /api/health", s.metrics.HealthHandler())
+	mux.HandleFunc("GET /live", s.handleLive)
+	mux.HandleFunc("GET /ready", s.handleReady)
 	mux.Handle("GET /metrics/prometheus", telemetry.PrometheusHandler())
 	mux.HandleFunc("DELETE /api/admin/purge", s.handlePurge)
 	mux.HandleFunc("POST /api/admin/vacuum", s.handleVacuum)

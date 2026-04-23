@@ -86,7 +86,7 @@ func initOTel() func(context.Context) error {
 
 func main() {
 	shutdown := initOTel()
-	defer shutdown(context.Background())
+	defer func() { _ = shutdown(context.Background()) }()
 
 	tracer = otel.Tracer("inventory-service")
 
@@ -121,7 +121,7 @@ func handleCheckInventory(w http.ResponseWriter, r *http.Request) {
 
 		time.Sleep(lockDuration)
 
-		err := fmt.Errorf("Database Lock Timeout: inventory_items table locked for %s", lockDuration)
+		err := fmt.Errorf("database lock timeout: inventory_items table locked for %s", lockDuration)
 		span.RecordError(err)
 		span.SetAttributes(attribute.String("error.type", "database_lock"))
 		span.SetStatus(codes.Error, err.Error())
@@ -134,5 +134,5 @@ func handleCheckInventory(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.Int("inventory.quantity_available", 10+rand.Intn(500)))
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Inventory Available"))
+	_, _ = w.Write([]byte("Inventory Available"))
 }

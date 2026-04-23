@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/RandomCodeSpace/otelcontext/internal/api/views"
 	"github.com/RandomCodeSpace/otelcontext/internal/realtime"
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 )
@@ -46,7 +47,7 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	logs, total, err := s.repo.GetLogsV2(filter)
+	logs, total, err := s.repo.GetLogsV2(r.Context(), filter)
 	if err != nil {
 		slog.Error("Failed to get logs", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -54,8 +55,8 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"data":  logs,
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"data":  views.LogsFromModels(logs),
 		"total": total,
 	})
 }
@@ -70,12 +71,12 @@ func (s *Server) handleGetLogContext(w http.ResponseWriter, r *http.Request) {
 
 	ts, err := time.Parse(time.RFC3339, tsStr)
 	if err != nil {
-		slog.Warn("Invalid timestamp format for log context", "timestamp", tsStr)
+		slog.Warn("Invalid timestamp format for log context", "timestamp", tsStr) // #nosec G706 -- slog uses structured k/v fields, not format interpolation
 		http.Error(w, "invalid timestamp format", http.StatusBadRequest)
 		return
 	}
 
-	logs, err := s.repo.GetLogContext(ts)
+	logs, err := s.repo.GetLogContext(r.Context(), ts)
 	if err != nil {
 		slog.Error("Failed to get log context", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -83,7 +84,7 @@ func (s *Server) handleGetLogContext(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(logs)
+	_ = json.NewEncoder(w).Encode(views.LogsFromModels(logs))
 }
 
 // handleGetLogInsight handles GET /api/logs/{id}/insight
@@ -99,7 +100,7 @@ func (s *Server) handleGetLogInsight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	l, err := s.repo.GetLog(uint(id))
+	l, err := s.repo.GetLog(r.Context(), uint(id)) // #nosec G115 -- id is parsed from URL; upstream validates positivity
 	if err != nil {
 		slog.Error("Log not found for insight", "id", id, "error", err)
 		http.Error(w, "log not found", http.StatusNotFound)
@@ -107,7 +108,7 @@ func (s *Server) handleGetLogInsight(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"insight": string(l.AIInsight)})
+	_ = json.NewEncoder(w).Encode(map[string]string{"insight": string(l.AIInsight)})
 }
 
 // BroadcastLog sends a log entry to the buffered WebSocket hub.
@@ -117,7 +118,7 @@ func (s *Server) BroadcastLog(l storage.Log) {
 		TraceID:        l.TraceID,
 		SpanID:         l.SpanID,
 		Severity:       l.Severity,
-		Body:           string(l.Body),
+		Body:           l.Body,
 		ServiceName:    l.ServiceName,
 		AttributesJSON: string(l.AttributesJSON),
 		AIInsight:      string(l.AIInsight),

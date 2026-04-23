@@ -17,19 +17,22 @@ type RawMetric struct {
 	ServiceName string
 	Value       float64
 	Timestamp   time.Time
-	Attributes  map[string]interface{}
+	Attributes  map[string]any
+	// TenantID identifies the owning tenant for this point. When empty the
+	// DB default ("default") applies at persist time.
+	TenantID string
 }
 
 // Aggregator manages in-memory tumbling windows for metrics.
 type Aggregator struct {
-	repo            *storage.Repository
-	windowSize      time.Duration
-	buckets         map[string]*storage.MetricBucket
-	mu              sync.Mutex
-	stopChan        chan struct{}
-	flushChan       chan []storage.MetricBucket
-	pool            sync.Pool
-	droppedBatches  int64
+	repo           *storage.Repository
+	windowSize     time.Duration
+	buckets        map[string]*storage.MetricBucket
+	mu             sync.Mutex
+	stopChan       chan struct{}
+	flushChan      chan []storage.MetricBucket
+	pool           sync.Pool
+	droppedBatches int64
 
 	// Cardinality controls
 	maxCardinality      int    // 0 = unlimited
@@ -56,7 +59,7 @@ func NewAggregator(repo *storage.Repository, windowSize time.Duration) *Aggregat
 		flushChan:   make(chan []storage.MetricBucket, 500),
 		overflowKey: "__cardinality_overflow__",
 	}
-	a.pool.New = func() interface{} {
+	a.pool.New = func() any {
 		return make([]storage.MetricBucket, 0, 100)
 	}
 	return a
@@ -119,7 +122,8 @@ func (a *Aggregator) Stop() {
 func (a *Aggregator) Ingest(m RawMetric) {
 	// Pre-compute key outside the lock — json.Marshal is CPU-bound and must not hold mu.
 	attrJSON, _ := json.Marshal(m.Attributes)
-	key := fmt.Sprintf("%s|%s|%s", m.ServiceName, m.Name, string(attrJSON))
+	// Include tenant in the key so points from different tenants never merge.
+	key := fmt.Sprintf("%s|%s|%s|%s", m.TenantID, m.ServiceName, m.Name, string(attrJSON))
 
 	// Feed ring buffer and metric counter outside the lock (both are thread-safe).
 	if a.ring != nil {
@@ -144,6 +148,7 @@ func (a *Aggregator) Ingest(m RawMetric) {
 			if bucket == nil {
 				windowStart := m.Timestamp.Truncate(a.windowSize)
 				bucket = &storage.MetricBucket{
+					TenantID:    m.TenantID,
 					Name:        "__overflow__",
 					ServiceName: m.ServiceName,
 					TimeBucket:  windowStart,
@@ -158,6 +163,7 @@ func (a *Aggregator) Ingest(m RawMetric) {
 		} else {
 			windowStart := m.Timestamp.Truncate(a.windowSize)
 			bucket = &storage.MetricBucket{
+				TenantID:       m.TenantID,
 				Name:           m.Name,
 				ServiceName:    m.ServiceName,
 				TimeBucket:     windowStart,
@@ -219,7 +225,7 @@ func (a *Aggregator) flush() {
 		}
 		slog.Warn("⚠️ TSDB flush channel full, dropping metric batch", "count", len(batch), "total_dropped", a.droppedBatches)
 		batch = batch[:0]
-		a.pool.Put(batch)
+		a.pool.Put(batch) //nolint:staticcheck // SA6002: []T in sync.Pool is intentional; proper refactor would change channel semantics
 	}
 }
 
@@ -229,7 +235,7 @@ func (a *Aggregator) persistenceWorker(ctx context.Context) {
 		select {
 		case batch := <-a.flushChan:
 			if len(batch) == 0 {
-				a.pool.Put(batch[:0])
+				a.pool.Put(batch[:0]) //nolint:staticcheck // SA6002: see flush() for rationale
 				continue
 			}
 			err := a.repo.BatchCreateMetrics(batch)
@@ -239,10 +245,9 @@ func (a *Aggregator) persistenceWorker(ctx context.Context) {
 				slog.Debug("💾 TSDB persisted metric batch", "count", len(batch))
 			}
 			batch = batch[:0]
-			a.pool.Put(batch)
+			a.pool.Put(batch) //nolint:staticcheck // SA6002: see flush() for rationale
 		case <-ctx.Done():
 			return
 		}
 	}
 }
-

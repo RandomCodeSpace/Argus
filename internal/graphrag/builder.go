@@ -2,29 +2,54 @@ package graphrag
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
+	"github.com/RandomCodeSpace/otelcontext/internal/telemetry"
 	"github.com/RandomCodeSpace/otelcontext/internal/tsdb"
 	"github.com/RandomCodeSpace/otelcontext/internal/vectordb"
 )
 
+// panicMetrics is an optional hook for incrementing the panics-recovered
+// metric from GraphRAG worker goroutines. Assigned via SetPanicMetrics.
+var panicMetrics *telemetry.Metrics
+
+// SetPanicMetrics wires the telemetry metrics so GraphRAG worker recovery
+// closures can increment OtelContext_panics_recovered_total{subsystem="graphrag"}.
+// Safe to leave unset in tests.
+func SetPanicMetrics(m *telemetry.Metrics) { panicMetrics = m }
+
+// guardWorker is a tiny helper that recovers from panics in a worker
+// goroutine, logs the stack, and increments the metric.
+func guardWorker(name string) {
+	if r := recover(); r != nil {
+		slog.Error("graphrag worker panic",
+			"worker", name,
+			"panic", r,
+			"stack", string(debug.Stack()),
+		)
+		if panicMetrics != nil && panicMetrics.PanicsRecoveredTotal != nil {
+			panicMetrics.PanicsRecoveredTotal.WithLabelValues("graphrag").Inc()
+		}
+	}
+}
+
 const (
-	defaultWorkerCount  = 4
-	defaultChannelSize  = 10000
-	defaultTraceTTL     = 1 * time.Hour
-	defaultRefreshEvery = 60 * time.Second
+	defaultWorkerCount   = 4
+	defaultChannelSize   = 10000
+	defaultTraceTTL      = 1 * time.Hour
+	defaultRefreshEvery  = 60 * time.Second
 	defaultSnapshotEvery = 15 * time.Minute
 	defaultAnomalyEvery  = 10 * time.Second
 )
 
 // spanEvent is sent through the ingestion channel.
 type spanEvent struct {
-	Span     storage.Span
-	TraceID  string
-	Status   string
+	Span    storage.Span
+	TraceID string
+	Status  string
 }
 
 // logEvent is sent through the ingestion channel.
@@ -46,45 +71,47 @@ type event struct {
 
 // GraphRAG is the main coordinator for the layered graph system.
 type GraphRAG struct {
-	ServiceStore  *ServiceStore
-	TraceStore    *TraceStore
-	SignalStore   *SignalStore
-	AnomalyStore  *AnomalyStore
+	ServiceStore *ServiceStore
+	TraceStore   *TraceStore
+	SignalStore  *SignalStore
+	AnomalyStore *AnomalyStore
 
-	repo       *storage.Repository
-	vectorIdx  *vectordb.Index
-	tsdbAgg    *tsdb.Aggregator
-	ringBuf    *tsdb.RingBuffer
+	repo      *storage.Repository
+	vectorIdx *vectordb.Index
+	tsdbAgg   *tsdb.Aggregator
+	ringBuf   *tsdb.RingBuffer
 
-	eventCh    chan event
-	stopCh     chan struct{}
+	drain *Drain // Drain log-template miner (see drain.go)
+
+	eventCh chan event
+	stopCh  chan struct{}
 
 	// Configuration
-	traceTTL       time.Duration
-	refreshEvery   time.Duration
-	snapshotEvery  time.Duration
-	anomalyEvery   time.Duration
+	traceTTL      time.Duration
+	refreshEvery  time.Duration
+	snapshotEvery time.Duration
+	anomalyEvery  time.Duration
 }
 
 // Config holds GraphRAG configuration.
 type Config struct {
-	TraceTTL       time.Duration
-	RefreshEvery   time.Duration
-	SnapshotEvery  time.Duration
-	AnomalyEvery   time.Duration
-	WorkerCount    int
-	ChannelSize    int
+	TraceTTL      time.Duration
+	RefreshEvery  time.Duration
+	SnapshotEvery time.Duration
+	AnomalyEvery  time.Duration
+	WorkerCount   int
+	ChannelSize   int
 }
 
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		TraceTTL:       defaultTraceTTL,
-		RefreshEvery:   defaultRefreshEvery,
-		SnapshotEvery:  defaultSnapshotEvery,
-		AnomalyEvery:   defaultAnomalyEvery,
-		WorkerCount:    defaultWorkerCount,
-		ChannelSize:    defaultChannelSize,
+		TraceTTL:      defaultTraceTTL,
+		RefreshEvery:  defaultRefreshEvery,
+		SnapshotEvery: defaultSnapshotEvery,
+		AnomalyEvery:  defaultAnomalyEvery,
+		WorkerCount:   defaultWorkerCount,
+		ChannelSize:   defaultChannelSize,
 	}
 }
 
@@ -109,7 +136,7 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 		cfg.ChannelSize = defaultChannelSize
 	}
 
-	return &GraphRAG{
+	g := &GraphRAG{
 		ServiceStore:  newServiceStore(),
 		TraceStore:    newTraceStore(cfg.TraceTTL),
 		SignalStore:   newSignalStore(),
@@ -118,6 +145,7 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 		vectorIdx:     vectorIdx,
 		tsdbAgg:       tsdbAgg,
 		ringBuf:       ringBuf,
+		drain:         NewDrain(),
 		eventCh:       make(chan event, cfg.ChannelSize),
 		stopCh:        make(chan struct{}),
 		traceTTL:      cfg.TraceTTL,
@@ -125,19 +153,47 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 		snapshotEvery: cfg.SnapshotEvery,
 		anomalyEvery:  cfg.AnomalyEvery,
 	}
+
+	// Restore persisted Drain templates so log clustering survives restarts.
+	// A missing table (fresh install) or transient DB error is non-fatal —
+	// ingestion will rebuild templates from scratch.
+	if repo != nil && repo.DB() != nil {
+		if tpls, err := LoadDrainTemplates(repo.DB()); err != nil {
+			slog.Info("GraphRAG: drain template restore skipped", "reason", err)
+		} else if len(tpls) > 0 {
+			g.drain.LoadTemplates(tpls)
+			slog.Info("GraphRAG: restored drain templates", "count", len(tpls))
+		}
+	}
+
+	return g
 }
 
 // Start begins background goroutines: workers, refresh, snapshot, anomaly detection.
+// Each goroutine is wrapped in a panic recovery so one misbehaving event
+// can't take down the whole subsystem.
 func (g *GraphRAG) Start(ctx context.Context) {
 	// Start event workers
 	for i := 0; i < defaultWorkerCount; i++ {
-		go g.eventWorker(ctx)
+		go func() {
+			defer guardWorker("eventWorker")
+			g.eventWorker(ctx)
+		}()
 	}
 
 	// Start background tasks
-	go g.refreshLoop(ctx)
-	go g.snapshotLoop(ctx)
-	go g.anomalyLoop(ctx)
+	go func() {
+		defer guardWorker("refreshLoop")
+		g.refreshLoop(ctx)
+	}()
+	go func() {
+		defer guardWorker("snapshotLoop")
+		g.snapshotLoop(ctx)
+	}()
+	go func() {
+		defer guardWorker("anomalyLoop")
+		g.anomalyLoop(ctx)
+	}()
 
 	slog.Info("GraphRAG started",
 		"workers", defaultWorkerCount,
@@ -148,8 +204,38 @@ func (g *GraphRAG) Start(ctx context.Context) {
 
 // Stop signals all goroutines to exit.
 func (g *GraphRAG) Stop() {
+	// Best-effort final Drain template persistence — losing the most recent
+	// updates on an unclean shutdown would force rebuilding from scratch.
+	if g.repo != nil && g.repo.DB() != nil && g.drain != nil {
+		if err := SaveDrainTemplates(g.repo.DB(), g.drain.Templates()); err != nil {
+			slog.Warn("GraphRAG: final drain template save failed", "error", err)
+		}
+	}
 	close(g.stopCh)
 	slog.Info("GraphRAG stopped")
+}
+
+// EventBufferDepth returns the current number of events queued in the
+// ingestion channel. Exported for telemetry polling; never blocks.
+func (g *GraphRAG) EventBufferDepth() int {
+	if g == nil || g.eventCh == nil {
+		return 0
+	}
+	return len(g.eventCh)
+}
+
+// IsRunning reports whether the coordinator's stop channel has not been closed.
+// Used by readiness probes to confirm the background workers are still live.
+func (g *GraphRAG) IsRunning() bool {
+	if g == nil {
+		return false
+	}
+	select {
+	case <-g.stopCh:
+		return false
+	default:
+		return true
+	}
 }
 
 // OnSpanIngested is the callback wired into the trace ingestion pipeline.
@@ -253,11 +339,12 @@ func (g *GraphRAG) processLog(ev *logEvent) {
 		return
 	}
 
-	// Compute cluster ID from log body using a simple hash
-	body := string(log.Body)
-	clusterID := fmt.Sprintf("lc_%s_%x", log.ServiceName, simpleHash(body))
-
-	g.SignalStore.UpsertLogCluster(clusterID, body, log.Severity, log.ServiceName, log.Timestamp)
+	// Drain-based clustering (replaces hash+TF-IDF clustering).
+	body := log.Body
+	clusterID := g.clusterLog(log.ServiceName, body, log.Severity, log.Timestamp)
+	if clusterID == "" {
+		return
+	}
 
 	// If log has trace_id + span_id, create LOGGED_DURING edge
 	if log.SpanID != "" {
@@ -277,7 +364,7 @@ func (g *GraphRAG) processMetric(ev *metricEvent) {
 func simpleHash(s string) uint32 {
 	var h uint32
 	for _, c := range s {
-		h = h*31 + uint32(c)
+		h = h*31 + uint32(c) // #nosec G115 -- rune -> uint32 for hash is intentional
 	}
 	return h
 }

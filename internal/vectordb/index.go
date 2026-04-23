@@ -13,11 +13,11 @@ import (
 
 // LogVector represents an indexed log entry.
 type LogVector struct {
-	LogID     uint
+	LogID       uint
 	ServiceName string
-	Severity  string
-	Body      string
-	vec       map[string]float64 // TF-IDF sparse vector
+	Severity    string
+	Body        string
+	vec         map[string]float64 // TF-IDF sparse vector
 }
 
 // SearchResult is a single similarity hit.
@@ -33,10 +33,10 @@ type SearchResult struct {
 // Only ERROR and WARN logs are indexed to keep it small and relevant.
 type Index struct {
 	mu      sync.RWMutex
-	docs    []LogVector          // indexed log vectors
-	idf     map[string]float64   // global IDF table
-	maxSize int                  // FIFO eviction cap
-	dirty   bool                 // IDF needs recompute
+	docs    []LogVector        // indexed log vectors
+	idf     map[string]float64 // global IDF table
+	maxSize int                // FIFO eviction cap
+	dirty   bool               // IDF needs recompute
 }
 
 // New creates a new Index with the given maximum entry cap.

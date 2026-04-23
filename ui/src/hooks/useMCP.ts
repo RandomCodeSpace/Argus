@@ -1,20 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
-import type { MCPTool } from '@/types/api'
+import type {
+  JsonRpcError,
+  JsonRpcResponse,
+  MCPTool,
+  McpToolsListResult,
+} from '@/types/api'
 
 export type MCPStatus = 'idle' | 'connecting' | 'connected' | 'error'
 
-interface RPCResult {
-  result?: unknown
-  error?: { code: number; message: string }
+interface RPCResult<T = unknown> {
+  result?: T
+  error?: JsonRpcError
   timing?: number
 }
 
-function parseMCPBody(text: string, contentType: string): unknown {
+function parseMCPBody<T = unknown>(text: string, contentType: string): JsonRpcResponse<T> {
   if (contentType.includes('application/json')) {
-    return JSON.parse(text)
+    return JSON.parse(text) as JsonRpcResponse<T>
   }
   const jsonLine = text.split('\n').find((line) => line.startsWith('data: '))?.slice(6)
-  return jsonLine ? JSON.parse(jsonLine) : {}
+  return (jsonLine ? JSON.parse(jsonLine) : {}) as JsonRpcResponse<T>
 }
 
 export function useMCP(endpoint = '/mcp') {
@@ -33,7 +38,7 @@ export function useMCP(endpoint = '/mcp') {
     return value
   }
 
-  const send = async (body: unknown) => {
+  const send = async <T = unknown>(body: unknown) => {
     const t0 = performance.now()
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -43,16 +48,16 @@ export function useMCP(endpoint = '/mcp') {
     const sid = res.headers.get('Mcp-Session-Id')
     if (sid) sessionId.current = sid
     const text = await res.text()
-    const data = parseMCPBody(text, res.headers.get('content-type') ?? '')
+    const data = parseMCPBody<T>(text, res.headers.get('content-type') ?? '')
     return { data, status: res.status, ms: Math.round(performance.now() - t0) }
   }
 
-  const call = async (method: string, params?: unknown): Promise<RPCResult> => {
+  const call = async <T = unknown>(method: string, params?: unknown): Promise<RPCResult<T>> => {
     try {
-      const response = await send({ jsonrpc: '2.0', id: ++id.current, method, params })
+      const response = await send<T>({ jsonrpc: '2.0', id: ++id.current, method, params })
       return {
-        result: (response.data as any)?.result,
-        error: (response.data as any)?.error,
+        result: response.data.result,
+        error: response.data.error,
         timing: response.ms,
       }
     } catch (e) {
@@ -74,8 +79,8 @@ export function useMCP(endpoint = '/mcp') {
       return
     }
     setStatus('connected')
-    const r2 = await call('tools/list', {})
-    if (!r2.error) setTools((r2.result as any)?.tools ?? [])
+    const r2 = await call<McpToolsListResult>('tools/list', {})
+    if (!r2.error) setTools(r2.result?.tools ?? [])
   }
 
   useEffect(() => {

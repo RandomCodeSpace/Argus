@@ -30,36 +30,48 @@ type Metrics struct {
 	HTTPRequestDuration *prometheus.HistogramVec
 
 	// --- TSDB ---
-	TSDBIngestTotal       prometheus.Counter
-	TSDBFlushDuration     prometheus.Histogram
-	TSDBBatchesDropped    prometheus.Counter
+	TSDBIngestTotal         prometheus.Counter
+	TSDBFlushDuration       prometheus.Histogram
+	TSDBBatchesDropped      prometheus.Counter
 	TSDBCardinalityOverflow prometheus.Counter
 
 	// --- WebSocket ---
-	WSMessagesSent        *prometheus.CounterVec
-	WSSlowClientsRemoved  prometheus.Counter
+	WSMessagesSent       *prometheus.CounterVec
+	WSSlowClientsRemoved prometheus.Counter
 
 	// --- DLQ ---
-	DLQEnqueuedTotal    prometheus.Counter
-	DLQReplaySuccess    prometheus.Counter
-	DLQReplayFailure    prometheus.Counter
-	DLQDiskBytes        prometheus.Gauge
+	DLQEnqueuedTotal prometheus.Counter
+	DLQReplaySuccess prometheus.Counter
+	DLQReplayFailure prometheus.Counter
+	DLQDiskBytes     prometheus.Gauge
 
-	// --- Archive ---
-	ArchiveRecordsMoved *prometheus.CounterVec
-	HotDBSizeBytes      prometheus.Gauge
-	ColdStorageBytes    prometheus.Gauge
+	// --- Storage ---
+	HotDBSizeBytes prometheus.Gauge
+
+	// --- Retention ---
+	RetentionRowsPurgedTotal       *prometheus.CounterVec
+	RetentionPurgeDurationSeconds  *prometheus.HistogramVec
+	RetentionVacuumDurationSeconds *prometheus.HistogramVec
 
 	// --- Runtime ---
-	GoGoroutines   prometheus.Gauge
+	GoGoroutines     prometheus.Gauge
 	GoHeapAllocBytes prometheus.Gauge
 
+	// --- Operational (Fix 6) ---
+	PanicsRecoveredTotal          *prometheus.CounterVec
+	MCPToolInvocationsTotal       *prometheus.CounterVec
+	APIAuthFailuresTotal          *prometheus.CounterVec
+	GraphRAGEventBufferDepth      prometheus.Gauge
+	RetentionLastSuccessTimestamp *prometheus.GaugeVec
+	RetentionConsecutiveFailures  *prometheus.GaugeVec
+	DBUp                          *prometheus.GaugeVec
+
 	// Atomic counters for JSON health endpoint (avoids scraping Prometheus)
-	totalIngested   atomic.Int64
-	activeConns     atomic.Int64
-	dlqFileCount    atomic.Int64
-	dbLatencyP99Ms  atomic.Int64
-	startTime       time.Time
+	totalIngested  atomic.Int64
+	activeConns    atomic.Int64
+	dlqFileCount   atomic.Int64
+	dbLatencyP99Ms atomic.Int64
+	startTime      time.Time
 }
 
 // New creates and registers all OtelContext internal metrics.
@@ -160,19 +172,27 @@ func New() *Metrics {
 			Help: "Total disk usage of the DLQ directory in bytes.",
 		}),
 
-		// Archive
-		ArchiveRecordsMoved: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "OtelContext_archive_records_moved_total",
-			Help: "Records moved to cold storage by data type.",
-		}, []string{"type"}),
+		// Storage
 		HotDBSizeBytes: promauto.NewGauge(prometheus.GaugeOpts{
 			Name: "OtelContext_hot_db_size_bytes",
 			Help: "Approximate hot database size in bytes.",
 		}),
-		ColdStorageBytes: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "OtelContext_cold_storage_bytes",
-			Help: "Total cold archive size on disk in bytes.",
-		}),
+
+		// Retention
+		RetentionRowsPurgedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "OtelContext_retention_rows_purged_total",
+			Help: "Total rows purged by retention, by table and driver.",
+		}, []string{"table", "driver"}),
+		RetentionPurgeDurationSeconds: promauto.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "OtelContext_retention_purge_duration_seconds",
+			Help:    "Wall-clock duration of a full retention purge pass, by driver.",
+			Buckets: prometheus.ExponentialBuckets(0.01, 2, 16),
+		}, []string{"driver"}),
+		RetentionVacuumDurationSeconds: promauto.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "OtelContext_retention_vacuum_duration_seconds",
+			Help:    "Duration of per-table retention maintenance (VACUUM/ANALYZE/OPTIMIZE), by driver and table.",
+			Buckets: prometheus.ExponentialBuckets(0.01, 2, 16),
+		}, []string{"driver", "table"}),
 
 		// Runtime
 		GoGoroutines: promauto.NewGauge(prometheus.GaugeOpts{
@@ -183,6 +203,36 @@ func New() *Metrics {
 			Name: "OtelContext_go_heap_alloc_bytes",
 			Help: "Current Go heap allocations in bytes.",
 		}),
+
+		// Operational (Fix 6)
+		PanicsRecoveredTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "OtelContext_panics_recovered_total",
+			Help: "Panics recovered by subsystem (http|grpc|graphrag|retention|ingest).",
+		}, []string{"subsystem"}),
+		MCPToolInvocationsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "OtelContext_mcp_tool_invocations_total",
+			Help: "MCP tool invocations by tool and status (ok|error).",
+		}, []string{"tool", "status"}),
+		APIAuthFailuresTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "OtelContext_api_auth_failures_total",
+			Help: "API key auth failures by reason (missing_header|bad_scheme|bad_key).",
+		}, []string{"reason"}),
+		GraphRAGEventBufferDepth: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "OtelContext_graphrag_event_buffer_depth",
+			Help: "Current depth of the GraphRAG ingestion event channel.",
+		}),
+		RetentionLastSuccessTimestamp: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "OtelContext_retention_last_success_timestamp",
+			Help: "Unix timestamp of the last successful retention job (purge|maintenance).",
+		}, []string{"job"}),
+		RetentionConsecutiveFailures: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "OtelContext_retention_consecutive_failures",
+			Help: "Consecutive failure count of the last retention job (purge|maintenance).",
+		}, []string{"job"}),
+		DBUp: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "OtelContext_db_up",
+			Help: "Database reachability (1=up, 0=down) by driver.",
+		}, []string{"driver"}),
 	}
 	return m
 }
@@ -267,11 +317,10 @@ func (m *Metrics) GetHealthStats() HealthStats {
 func (m *Metrics) HealthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(m.GetHealthStats())
+		_ = json.NewEncoder(w).Encode(m.GetHealthStats())
 	}
 }
 
 func PrometheusHandler() http.Handler {
 	return promhttp.Handler()
 }
-

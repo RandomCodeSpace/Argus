@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,7 +18,6 @@ import (
 
 	"github.com/RandomCodeSpace/otelcontext/internal/ai"
 	"github.com/RandomCodeSpace/otelcontext/internal/api"
-	"github.com/RandomCodeSpace/otelcontext/internal/archive"
 	"github.com/RandomCodeSpace/otelcontext/internal/config"
 	"github.com/RandomCodeSpace/otelcontext/internal/graph"
 	"github.com/RandomCodeSpace/otelcontext/internal/graphrag"
@@ -29,22 +27,81 @@ import (
 	"github.com/RandomCodeSpace/otelcontext/internal/realtime"
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 	"github.com/RandomCodeSpace/otelcontext/internal/telemetry"
+	tlsbootstrap "github.com/RandomCodeSpace/otelcontext/internal/tls"
 	"github.com/RandomCodeSpace/otelcontext/internal/tsdb"
-	"github.com/RandomCodeSpace/otelcontext/internal/vectordb"
 	"github.com/RandomCodeSpace/otelcontext/internal/ui"
+	"github.com/RandomCodeSpace/otelcontext/internal/vectordb"
 
+	"runtime/debug"
+	"sync"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	sdkresource "go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.25.0"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip" // Register gzip decompressor
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 )
-
 
 // Version is detected from build info at startup.
 // Returns the real tag when installed via `go install`, "local" otherwise.
 var Version = version.Detect()
+
+// cleanupStack is an ordered LIFO list of cleanup closures registered during
+// startup. fatal() walks it before os.Exit so DBs, DLQs, and tracer providers
+// get a chance to flush even on a fatal error. Each fn should be non-blocking
+// or have its own bounded timeout.
+var (
+	cleanupMu    sync.Mutex
+	cleanupStack []func()
+)
+
+// RegisterCleanup pushes a cleanup closure onto the LIFO stack. Exported so
+// future startup helpers outside main can enroll resources; the stack is
+// walked by fatal() on failed boot.
+func RegisterCleanup(fn func()) {
+	cleanupMu.Lock()
+	cleanupStack = append(cleanupStack, fn)
+	cleanupMu.Unlock()
+}
+
+// runCleanups pops and invokes cleanup closures in LIFO order.
+func runCleanups() {
+	cleanupMu.Lock()
+	fns := cleanupStack
+	cleanupStack = nil
+	cleanupMu.Unlock()
+	for i := len(fns) - 1; i >= 0; i-- {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("cleanup panic", "panic", r)
+				}
+			}()
+			fns[i]()
+		}()
+	}
+}
+
+// fatal replaces scattered log.Fatalf calls. It emits a structured error,
+// runs any registered cleanups in LIFO order, and exits 1. Extra key/value
+// pairs are passed straight through to slog.Error.
+func fatal(msg string, err error, kv ...any) {
+	args := append([]any{slog.Any("error", err)}, kv...)
+	slog.Error(msg, args...)
+	runCleanups()
+	os.Exit(1)
+}
 
 func main() {
 	versionFlag := flag.Bool("version", false, "print version and exit")
@@ -60,15 +117,22 @@ func main() {
 
 	printBanner()
 
+	// Top-level application context used by boot-time background goroutines
+	// (e.g. vector-index hydrator) so they can be cancelled before the DB closes.
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
+
+	// WaitGroup for boot-time goroutines whose completion must be awaited
+	// during shutdown (vector index hydrator, DB health poller).
+	var bootWG sync.WaitGroup
+
 	// 0. Load Configuration
 	cfg, err := config.Load("")
 	if err != nil {
-		slog.Error("failed to load configuration", "error", err)
-		os.Exit(1)
+		fatal("failed to load configuration", err)
 	}
 	if err := cfg.Validate(); err != nil {
-		slog.Error("invalid configuration", "error", err)
-		os.Exit(1)
+		fatal("invalid configuration", err)
 	}
 
 	// Initialize structured logger
@@ -95,12 +159,31 @@ func main() {
 	metrics := telemetry.New()
 	slog.Info("📊 Internal telemetry initialized")
 
+	// 1b. Initialize OTel self-instrumentation (optional)
+	var shutdownTracer func(context.Context) error
+	if cfg.OTelExporterEndpoint != "" {
+		tp, err := initTracerProvider(cfg.OTelExporterEndpoint)
+		if err != nil {
+			slog.Error("Failed to initialize OTel tracer provider", "error", err, "endpoint", cfg.OTelExporterEndpoint)
+		} else {
+			otel.SetTracerProvider(tp)
+			shutdownTracer = tp.Shutdown
+			slog.Info("🔭 OTel self-instrumentation enabled", "endpoint", cfg.OTelExporterEndpoint)
+		}
+	}
+
 	// 2. Initialize Storage
 	repo, err := storage.NewRepository(metrics)
 	if err != nil {
-		log.Fatalf("Failed to initialize repository: %v", err)
+		fatal("Failed to initialize repository", err)
 	}
 	slog.Info("💾 Storage initialized", "driver", cfg.DBDriver)
+
+	// 2a. Retention scheduler: hourly batched purge + daily VACUUM/ANALYZE.
+	ctxRetention, cancelRetention := context.WithCancel(context.Background())
+	retention := storage.NewRetentionScheduler(repo, cfg.HotRetentionDays)
+	retention.Start(ctxRetention)
+	slog.Info("🧹 Retention scheduler started", "retention_days", cfg.HotRetentionDays)
 
 	// 3. Initialize DLQ (Dead Letter Queue)
 	replayInterval, err := time.ParseDuration(cfg.DLQReplayInterval)
@@ -152,7 +235,7 @@ func main() {
 		}
 	}, cfg.DLQMaxFiles, int64(cfg.DLQMaxDiskMB), cfg.DLQMaxRetries)
 	if err != nil {
-		log.Fatalf("Failed to initialize DLQ: %v", err)
+		fatal("Failed to initialize DLQ", err)
 	}
 	dlq.SetMetrics(
 		func() { metrics.DLQEnqueuedTotal.Inc() },
@@ -204,16 +287,6 @@ func main() {
 	go tsdbAgg.Start(ctxTSDB)
 	slog.Info("📈 TSDB Aggregator started (30s window)")
 
-	// 4d. Initialize Archive Worker (hot/cold storage tiering)
-	archiver := archive.New(repo, cfg)
-	archiver.SetMetrics(metrics)
-	ctxArchive, cancelArchive := context.WithCancel(context.Background())
-	go archiver.Start(ctxArchive)
-	slog.Info("🗄️  Archive worker started",
-		"hot_retention_days", cfg.HotRetentionDays,
-		"cold_path", cfg.ColdStoragePath,
-	)
-
 	// 4e. Initialize In-Memory Service Graph (rebuilds from spans every 30s)
 	svcGraph := graph.New(func(since time.Time) ([]graph.SpanRow, error) {
 		rows, err := repo.GetSpansForGraph(since)
@@ -243,8 +316,11 @@ func main() {
 	slog.Info("🔍 Vector index initialized", "max_entries", cfg.VectorIndexMaxEntries)
 
 	// Hydrate vector index from recent ERROR/WARN logs on startup (non-blocking).
+	// Uses appCtx so SIGTERM during boot cancels the query before repo.Close().
+	bootWG.Add(1)
 	go func() {
-		recentLogs, _, err := repo.GetLogsV2(storage.LogFilter{
+		defer bootWG.Done()
+		recentLogs, _, err := repo.GetLogsV2(appCtx, storage.LogFilter{
 			Severity:  "ERROR",
 			StartTime: time.Now().Add(-24 * time.Hour),
 			EndTime:   time.Now(),
@@ -252,13 +328,14 @@ func main() {
 		})
 		if err == nil {
 			for _, l := range recentLogs {
-				vectorIdx.Add(l.ID, l.ServiceName, l.Severity, string(l.Body))
+				vectorIdx.Add(l.ID, l.ServiceName, l.Severity, l.Body)
 			}
 			slog.Info("🔍 Vector index hydrated from recent ERROR logs", "count", len(recentLogs))
 		}
 	}()
 
 	// 4g. Initialize GraphRAG (replaces simple graph for advanced queries)
+	graphrag.SetPanicMetrics(metrics)
 	graphRAG := graphrag.New(repo, vectorIdx, tsdbAgg, ringBuf, graphrag.DefaultConfig())
 	ctxGraphRAG, cancelGraphRAG := context.WithCancel(context.Background())
 	go graphRAG.Start(ctxGraphRAG)
@@ -277,7 +354,6 @@ func main() {
 	apiServer.SetGraph(svcGraph)
 	apiServer.SetGraphRAG(graphRAG)
 	apiServer.SetVectorIndex(vectorIdx)
-	apiServer.SetColdStoragePath(cfg.ColdStoragePath)
 
 	// 6b. Initialize MCP Server (HTTP Streamable, JSON-RPC 2.0 + SSE)
 	mcpServer := mcp.New(repo, metrics, svcGraph, vectorIdx)
@@ -308,14 +384,14 @@ func main() {
 			TraceID:        l.TraceID,
 			SpanID:         l.SpanID,
 			Severity:       l.Severity,
-			Body:           string(l.Body),
+			Body:           l.Body,
 			ServiceName:    l.ServiceName,
 			AttributesJSON: string(l.AttributesJSON),
 			AIInsight:      string(l.AIInsight),
 			Timestamp:      l.Timestamp,
 		})
 		aiService.EnqueueLog(l)
-		vectorIdx.Add(l.ID, l.ServiceName, l.Severity, string(l.Body))
+		vectorIdx.Add(l.ID, l.ServiceName, l.Severity, l.Body)
 		eventHub.NotifyRefresh()
 		if time.Since(start) > 100*time.Millisecond {
 			slog.Warn("Slow broadcast/enqueue", "duration", time.Since(start))
@@ -357,14 +433,59 @@ func main() {
 		}
 	}()
 
+	// Resolve TLS material once: explicit cert-file > self-signed > plaintext.
+	// Both gRPC and HTTP reuse the same resolved paths below.
+	var (
+		tlsCertPath string
+		tlsKeyPath  string
+		tlsMode     string // "cert-file", "self-signed", or "" (plaintext)
+	)
+	switch {
+	case cfg.TLSCertFileMode():
+		tlsCertPath = cfg.TLSCertFile
+		tlsKeyPath = cfg.TLSKeyFile
+		tlsMode = "cert-file"
+	case cfg.TLSSelfsignedMode():
+		cp, kp, err := tlsbootstrap.EnsureSelfSignedCert(cfg.TLSCacheDir)
+		if err != nil {
+			fatal("Failed to bootstrap self-signed TLS cert", err)
+		}
+		tlsCertPath = cp
+		tlsKeyPath = kp
+		tlsMode = "self-signed"
+	}
+
 	// Start gRPC Server
 	lis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
 	if err != nil {
-		log.Fatalf("Failed to listen on :%s: %v", cfg.GRPCPort, err)
+		fatal("Failed to listen on gRPC port", err, "port", cfg.GRPCPort)
 	}
-	grpcServer := grpc.NewServer(
-		grpc.UnaryInterceptor(metricsUnaryInterceptor(metrics)),
-	)
+	grpcOpts := []grpc.ServerOption{
+		// Recovery FIRST so a panic inside the metrics interceptor is still caught.
+		grpc.ChainUnaryInterceptor(
+			recoveryUnaryInterceptor(metrics),
+			metricsUnaryInterceptor(metrics),
+		),
+	}
+	switch tlsMode {
+	case "cert-file":
+		creds, err := credentials.NewServerTLSFromFile(tlsCertPath, tlsKeyPath)
+		if err != nil {
+			fatal("Failed to load gRPC TLS credentials", err)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+		slog.Info("🔒 gRPC TLS enabled", "mode", "cert-file")
+	case "self-signed":
+		creds, err := credentials.NewServerTLSFromFile(tlsCertPath, tlsKeyPath)
+		if err != nil {
+			fatal("Failed to load gRPC TLS credentials (self-signed)", err)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+		slog.Info("🔒 gRPC TLS enabled", "mode", "self-signed", "cache_dir", cfg.TLSCacheDir)
+	default:
+		slog.Info("🔓 gRPC plaintext — not for production; set TLS_CERT_FILE/TLS_KEY_FILE or TLS_AUTO_SELFSIGNED=true")
+	}
+	grpcServer := grpc.NewServer(grpcOpts...)
 	coltracepb.RegisterTraceServiceServer(grpcServer, traceServer)
 	collogspb.RegisterLogsServiceServer(grpcServer, logsServer)
 	colmetricspb.RegisterMetricsServiceServer(grpcServer, metricsServer)
@@ -373,7 +494,7 @@ func main() {
 	go func() {
 		slog.Info("📡 gRPC OTLP receiver started", "port", cfg.GRPCPort)
 		if err := grpcServer.Serve(lis); err != nil {
-			log.Fatalf("Failed to serve gRPC: %v", err)
+			fatal("Failed to serve gRPC", err)
 		}
 	}()
 
@@ -404,25 +525,101 @@ func main() {
 	uiServer := ui.NewServer(repo, metrics, svcGraph, vectorIdx)
 	uiServer.SetMCPConfig(cfg.MCPEnabled, cfg.MCPPath)
 	if err := uiServer.RegisterRoutes(mux); err != nil {
-		log.Fatalf("Failed to register UI routes: %v", err)
+		fatal("Failed to register UI routes", err)
 	}
 
-	var httpHandler http.Handler = api.MetricsMiddleware(metrics, mux)
+	var httpHandler http.Handler = mux
+
+	// Resolve tenant on /api/* read-side requests (passes through OTLP /v1,
+	// MCP, UI assets, and health probes untouched).
+	httpHandler = api.TenantMiddleware(cfg)(httpHandler)
+
+	// Wire auth-failure metric hook before installing any auth middleware.
+	api.AuthFailureHook = func(reason string) {
+		metrics.APIAuthFailuresTotal.WithLabelValues(reason).Inc()
+	}
+
+	// Authentication. Per-tenant keys (if configured) take precedence over the
+	// shared API key — they enforce tenant boundaries at the auth layer rather
+	// than trusting a client-supplied X-Tenant-ID header.
+	switch {
+	case cfg.APITenantKeysFile != "":
+		entries, err := api.LoadTenantKeys(cfg.APITenantKeysFile)
+		if err != nil {
+			fatal("load tenant keys file", err, "path", cfg.APITenantKeysFile)
+		}
+		tka := api.NewTenantKeyAuth(entries)
+		httpHandler = tka.Middleware(cfg.MCPPath, httpHandler)
+		slog.Info("🔑 Per-tenant API key authentication enabled", "tenants", len(entries))
+	case cfg.APIKey != "":
+		httpHandler = api.APIKeyGate(cfg.APIKey, cfg.MCPPath, httpHandler)
+		slog.Info("🔑 API key authentication enabled (shared key)")
+	default:
+		slog.Warn("API authentication disabled — set API_KEY or API_TENANT_KEYS_FILE for production")
+	}
+
+	httpHandler = api.MetricsMiddleware(metrics, httpHandler)
 	if cfg.APIRateLimitRPS > 0 {
 		rl := api.NewRateLimiter(float64(cfg.APIRateLimitRPS))
 		httpHandler = rl.Middleware(httpHandler)
 		slog.Info("🛡️  API rate limiter enabled", "rps_per_ip", cfg.APIRateLimitRPS)
 	}
 
+	// DB health fast-fail gate: returns 503 for DB-dependent paths when the
+	// pool is unreachable. Probes, metrics, and UI assets bypass.
+	var dbHealth *api.DBHealth
+	if sqlDB, dbErr := repo.DB().DB(); dbErr == nil && sqlDB != nil {
+		dbHealth = api.NewDBHealth(sqlDB, cfg.DBDriver, metrics)
+		dbHealth.Start(appCtx)
+		httpHandler = api.DBHealthMiddleware(dbHealth)(httpHandler)
+		slog.Info("🩺 DB health middleware enabled", "driver", cfg.DBDriver)
+	} else {
+		slog.Warn("DB health middleware disabled (cannot get *sql.DB)", "error", dbErr)
+	}
+
+	// GraphRAG event-buffer depth poller (Fix 6).
+	bootWG.Add(1)
+	go func() {
+		defer bootWG.Done()
+		tick := time.NewTicker(1 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-appCtx.Done():
+				return
+			case <-tick.C:
+				metrics.GraphRAGEventBufferDepth.Set(float64(graphRAG.EventBufferDepth()))
+			}
+		}
+	}()
+
+	// Panic recovery: OUTERMOST middleware below OTel tracing — ensures any
+	// panic in downstream middleware or handlers is logged + metered and the
+	// process survives.
+	httpHandler = api.RecoverMiddleware(metrics, httpHandler)
+
+	// OTel HTTP instrumentation (outermost — captures every request).
+	if shutdownTracer != nil {
+		httpHandler = otelhttp.NewHandler(httpHandler, "otelcontext.http")
+	}
+
 	srv := &http.Server{
-		Addr:    ":" + cfg.HTTPPort,
-		Handler: httpHandler,
+		Addr:              ":" + cfg.HTTPPort,
+		Handler:           httpHandler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
-		slog.Info("🌐 HTTP server started", "port", cfg.HTTPPort)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server failed: %v", err)
+		if tlsMode != "" {
+			slog.Info("🔒 HTTPS server started", "port", cfg.HTTPPort, "mode", tlsMode)
+			if err := srv.ListenAndServeTLS(tlsCertPath, tlsKeyPath); err != nil && err != http.ErrServerClosed {
+				fatal("HTTPS server failed", err)
+			}
+		} else {
+			slog.Info("🌐 HTTP server started (plaintext — not for production)", "port", cfg.HTTPPort)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				fatal("HTTP server failed", err)
+			}
 		}
 	}()
 
@@ -448,10 +645,9 @@ func main() {
 	cancelEvents()
 	aiService.Stop()
 
-	// 3. Stop processing engines (TSDB flush, archiver, graph, GraphRAG)
+	// 3. Stop processing engines (TSDB flush, graph, GraphRAG)
 	tsdbAgg.Stop()
 	cancelTSDB()
-	cancelArchive()
 	cancelGraph()
 	graphRAG.Stop()
 	cancelGraphRAG()
@@ -459,12 +655,68 @@ func main() {
 	// 4. Stop DLQ (may still be replaying)
 	dlq.Stop()
 
+	// 4a. Stop retention scheduler before closing DB (it issues queries).
+	cancelRetention()
+	retention.Stop()
+
+	// 4b. Shutdown the OTel tracer provider (flushes pending spans).
+	if shutdownTracer != nil {
+		if err := shutdownTracer(ctx); err != nil {
+			slog.Error("Failed to shutdown tracer provider", "error", err)
+		}
+	}
+
+	// 4b2. Stop DB health poller before cancelling appCtx so final state is
+	// written to the gauge before the pool closes.
+	if dbHealth != nil {
+		dbHealth.Stop()
+	}
+
+	// 4c. Cancel boot-time goroutines (hydrator, DB health poller) and wait
+	// with a bounded timeout before closing the DB — otherwise a mid-query
+	// hydrator would race with the pool closing underneath it.
+	appCancel()
+	waitDone := make(chan struct{})
+	go func() { bootWG.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-time.After(10 * time.Second):
+		slog.Warn("hydrator did not finish before shutdown; cancelling")
+	}
+
 	// 5. Close database last (everything above may still write)
 	if err := repo.Close(); err != nil {
 		slog.Error("Failed to close database", "error", err)
 	}
 
 	slog.Info("✅ OtelContext V5.4 shutdown complete")
+}
+
+// recoveryUnaryInterceptor catches panics inside any unary gRPC handler,
+// logs the stack, increments the panics-recovered metric, and maps the panic
+// to codes.Internal so the connection stays alive.
+func recoveryUnaryInterceptor(m *telemetry.Metrics) grpc.UnaryServerInterceptor {
+	return func(
+		ctx context.Context,
+		req any,
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (resp any, err error) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("grpc panic recovered",
+					"method", info.FullMethod,
+					"panic", rec,
+					"stack", string(debug.Stack()),
+				)
+				if m != nil && m.PanicsRecoveredTotal != nil {
+					m.PanicsRecoveredTotal.WithLabelValues("grpc").Inc()
+				}
+				err = status.Errorf(codes.Internal, "internal")
+			}
+		}()
+		return handler(ctx, req)
+	}
 }
 
 // metricsUnaryInterceptor records OtelContext_grpc_requests_total and OtelContext_grpc_request_duration_seconds
@@ -490,6 +742,39 @@ func metricsUnaryInterceptor(m *telemetry.Metrics) grpc.UnaryServerInterceptor {
 	}
 }
 
+// initTracerProvider builds an OTel tracer provider that exports spans via OTLP
+// gRPC to the configured endpoint. The endpoint can be "host:port" (insecure is
+// used since the endpoint is typically the platform's own gRPC port or a local
+// collector — TLS to an external collector can be added later).
+func initTracerProvider(endpoint string) (*sdktrace.TracerProvider, error) {
+	ctx := context.Background()
+
+	client := otlptracegrpc.NewClient(
+		otlptracegrpc.WithEndpoint(endpoint),
+		otlptracegrpc.WithInsecure(),
+	)
+	exporter, err := otlptrace.New(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("otlptrace.New: %w", err)
+	}
+
+	res, err := sdkresource.New(ctx,
+		sdkresource.WithAttributes(
+			semconv.ServiceName("otelcontext"),
+			semconv.ServiceVersion(Version),
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sdkresource.New: %w", err)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+	)
+	return tp, nil
+}
+
 func printBanner() {
 	banner := `
   ___ _____ _____ _     
@@ -502,5 +787,3 @@ func printBanner() {
 `
 	fmt.Printf(banner, Version)
 }
-
-

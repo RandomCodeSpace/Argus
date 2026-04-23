@@ -6,17 +6,17 @@ package mcp
 // JSON-RPC 2.0 base types.
 
 type JSONRPCRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id"` // string | number | null
-	Method  string      `json:"method"`
-	Params  interface{} `json:"params,omitempty"`
+	JSONRPC string `json:"jsonrpc"`
+	ID      any    `json:"id"` // string | number | null
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
 }
 
 type JSONRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   *RPCError   `json:"error,omitempty"`
+	JSONRPC string    `json:"jsonrpc"`
+	ID      any       `json:"id"`
+	Result  any       `json:"result,omitempty"`
+	Error   *RPCError `json:"error,omitempty"`
 }
 
 type RPCError struct {
@@ -89,7 +89,7 @@ type ToolCallResult struct {
 }
 
 type ContentItem struct {
-	Type     string    `json:"type"`           // "text" | "resource"
+	Type     string    `json:"type"` // "text" | "resource"
 	Text     string    `json:"text,omitempty"`
 	Resource *Resource `json:"resource,omitempty"`
 }
@@ -105,4 +105,3 @@ type SSEEvent struct {
 	Event string
 	Data  string
 }
-

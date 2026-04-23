@@ -13,13 +13,13 @@ import (
 // SpanRow is the minimal span data needed to build the graph.
 // Callers supply this via the DataProvider to decouple the graph from GORM.
 type SpanRow struct {
-	SpanID       string
-	ParentSpanID string
-	ServiceName  string
+	SpanID        string
+	ParentSpanID  string
+	ServiceName   string
 	OperationName string
-	DurationMs   float64
-	IsError      bool
-	Timestamp    time.Time
+	DurationMs    float64
+	IsError       bool
+	Timestamp     time.Time
 }
 
 // DataProvider is the function the graph calls every refresh cycle to fetch
@@ -48,24 +48,24 @@ type ServiceNode struct {
 	HealthScore float64 // 0.0–1.0
 	Status      string  // "healthy" | "degraded" | "critical"
 
-	RequestRateRPS  float64
-	ErrorRate       float64
-	AvgLatencyMs    float64
-	P99LatencyMs    float64
-	SpanCount       int64
-	LogErrorCount   int64 // set externally by callers if needed
+	RequestRateRPS float64
+	ErrorRate      float64
+	AvgLatencyMs   float64
+	P99LatencyMs   float64
+	SpanCount      int64
+	LogErrorCount  int64 // set externally by callers if needed
 
 	Alerts []string
 }
 
 // ServiceEdge is a directed dependency between two services.
 type ServiceEdge struct {
-	Source      string
-	Target      string
-	CallCount   int64
+	Source       string
+	Target       string
+	CallCount    int64
 	AvgLatencyMs float64
-	ErrorRate   float64
-	Status      string // "healthy" | "degraded" | "critical"
+	ErrorRate    float64
+	Status       string // "healthy" | "degraded" | "critical"
 }
 
 // Snapshot is the immutable graph state returned to callers.
@@ -308,9 +308,9 @@ func pctStr(f float64) string {
 	pct := int(f * 100)
 	s := ""
 	if pct >= 10 {
-		s = string(rune('0'+pct/10)) + string(rune('0'+pct%10)) + "%"
+		s = string(rune('0'+pct/10)) + string(rune('0'+pct%10)) + "%" // #nosec G115 -- pct is 0-99, fits rune
 	} else {
-		s = string(rune('0'+pct)) + "%"
+		s = string(rune('0'+pct)) + "%" // #nosec G115 -- pct is 0-9, fits rune
 	}
 	return s
 }

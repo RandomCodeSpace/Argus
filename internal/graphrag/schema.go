@@ -13,13 +13,13 @@ import (
 type NodeType string
 
 const (
-	NodeService      NodeType = "service"
-	NodeOperation    NodeType = "operation"
-	NodeTrace        NodeType = "trace"
-	NodeSpan         NodeType = "span"
-	NodeLogCluster   NodeType = "log_cluster"
-	NodeMetric       NodeType = "metric"
-	NodeAnomaly      NodeType = "anomaly"
+	NodeService    NodeType = "service"
+	NodeOperation  NodeType = "operation"
+	NodeTrace      NodeType = "trace"
+	NodeSpan       NodeType = "span"
+	NodeLogCluster NodeType = "log_cluster"
+	NodeMetric     NodeType = "metric"
+	NodeAnomaly    NodeType = "anomaly"
 )
 
 // ServiceNode represents a microservice with aggregated health stats.
@@ -80,13 +80,20 @@ type SpanNode struct {
 }
 
 // LogClusterNode groups similar log messages.
+//
+// Clustering is performed by the Drain template miner. TemplateID is the
+// stable FNV-64 hash of TemplateTokens; ID is the user-facing cluster
+// identifier (service-scoped) that remains stable across Drain re-merges.
 type LogClusterNode struct {
-	ID          string    `json:"id"` // template hash
-	Template    string    `json:"template"`
-	Count       int64     `json:"count"`
-	FirstSeen   time.Time `json:"first_seen"`
-	LastSeen    time.Time `json:"last_seen"`
-	SeverityDist map[string]int64 `json:"severity_distribution"`
+	ID             string           `json:"id"` // service-scoped cluster id (stable)
+	Template       string           `json:"template"`
+	TemplateID     uint64           `json:"template_id,omitempty"`
+	TemplateTokens []string         `json:"template_tokens,omitempty"`
+	SampleLog      string           `json:"sample_log,omitempty"`
+	Count          int64            `json:"count"`
+	FirstSeen      time.Time        `json:"first_seen"`
+	LastSeen       time.Time        `json:"last_seen"`
+	SeverityDist   map[string]int64 `json:"severity_distribution"`
 }
 
 // MetricNode represents a metric series for a service.
@@ -114,9 +121,9 @@ const (
 type AnomalyType string
 
 const (
-	AnomalyErrorSpike    AnomalyType = "error_spike"
-	AnomalyLatencySpike  AnomalyType = "latency_spike"
-	AnomalyMetricZScore  AnomalyType = "metric_zscore"
+	AnomalyErrorSpike   AnomalyType = "error_spike"
+	AnomalyLatencySpike AnomalyType = "latency_spike"
+	AnomalyMetricZScore AnomalyType = "metric_zscore"
 )
 
 // AnomalyNode represents a detected anomaly.
@@ -135,40 +142,40 @@ type AnomalyNode struct {
 type EdgeType string
 
 const (
-	EdgeCalls       EdgeType = "CALLS"
-	EdgeExposes     EdgeType = "EXPOSES"
-	EdgeContains    EdgeType = "CONTAINS"
-	EdgeChildOf     EdgeType = "CHILD_OF"
-	EdgeEmittedBy   EdgeType = "EMITTED_BY"
+	EdgeCalls        EdgeType = "CALLS"
+	EdgeExposes      EdgeType = "EXPOSES"
+	EdgeContains     EdgeType = "CONTAINS"
+	EdgeChildOf      EdgeType = "CHILD_OF"
+	EdgeEmittedBy    EdgeType = "EMITTED_BY"
 	EdgeLoggedDuring EdgeType = "LOGGED_DURING"
-	EdgeMeasuredBy  EdgeType = "MEASURED_BY"
-	EdgePrecededBy  EdgeType = "PRECEDED_BY"
-	EdgeTriggeredBy EdgeType = "TRIGGERED_BY"
+	EdgeMeasuredBy   EdgeType = "MEASURED_BY"
+	EdgePrecededBy   EdgeType = "PRECEDED_BY"
+	EdgeTriggeredBy  EdgeType = "TRIGGERED_BY"
 )
 
 // Edge represents a directed relationship between two nodes.
 type Edge struct {
-	Type      EdgeType  `json:"type"`
-	FromID    string    `json:"from_id"`
-	ToID      string    `json:"to_id"`
-	Weight    float64   `json:"weight,omitempty"`
-	CallCount int64     `json:"call_count,omitempty"`
-	ErrorRate float64   `json:"error_rate,omitempty"`
-	AvgMs     float64   `json:"avg_latency_ms,omitempty"`
-	TotalMs   float64   `json:"-"`
-	ErrorCount int64    `json:"-"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Type       EdgeType  `json:"type"`
+	FromID     string    `json:"from_id"`
+	ToID       string    `json:"to_id"`
+	Weight     float64   `json:"weight,omitempty"`
+	CallCount  int64     `json:"call_count,omitempty"`
+	ErrorRate  float64   `json:"error_rate,omitempty"`
+	AvgMs      float64   `json:"avg_latency_ms,omitempty"`
+	TotalMs    float64   `json:"-"`
+	ErrorCount int64     `json:"-"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // --- Query Result Types ---
 
 // ErrorChainResult is the output of an error chain query.
 type ErrorChainResult struct {
-	RootCause        *RootCauseInfo    `json:"root_cause"`
-	SpanChain        []SpanNode        `json:"span_chain"`
-	CorrelatedLogs   []LogClusterNode  `json:"correlated_logs,omitempty"`
-	AnomalousMetrics []MetricNode      `json:"anomalous_metrics,omitempty"`
-	TraceID          string            `json:"trace_id"`
+	RootCause        *RootCauseInfo   `json:"root_cause"`
+	SpanChain        []SpanNode       `json:"span_chain"`
+	CorrelatedLogs   []LogClusterNode `json:"correlated_logs,omitempty"`
+	AnomalousMetrics []MetricNode     `json:"anomalous_metrics,omitempty"`
+	TraceID          string           `json:"trace_id"`
 }
 
 // RootCauseInfo identifies the responsible service and operation.
@@ -182,9 +189,9 @@ type RootCauseInfo struct {
 
 // ImpactResult describes the blast radius of a service failure.
 type ImpactResult struct {
-	Service          string           `json:"service"`
-	AffectedServices []AffectedEntry  `json:"affected_services"`
-	TotalDownstream  int              `json:"total_downstream"`
+	Service          string          `json:"service"`
+	AffectedServices []AffectedEntry `json:"affected_services"`
+	TotalDownstream  int             `json:"total_downstream"`
 }
 
 // AffectedEntry is a service affected by an upstream failure.
@@ -197,10 +204,32 @@ type AffectedEntry struct {
 
 // RankedCause is a probable root cause with evidence.
 type RankedCause struct {
-	Service    string       `json:"service"`
-	Operation  string       `json:"operation"`
-	Score      float64      `json:"score"`
-	Evidence   []string     `json:"evidence"`
-	ErrorChain []SpanNode   `json:"error_chain,omitempty"`
+	Service    string        `json:"service"`
+	Operation  string        `json:"operation"`
+	Score      float64       `json:"score"`
+	Evidence   []string      `json:"evidence"`
+	ErrorChain []SpanNode    `json:"error_chain,omitempty"`
 	Anomalies  []AnomalyNode `json:"anomalies,omitempty"`
 }
+
+// --- Drain Template Persistence ---
+
+// DrainTemplateRow is the persisted GORM representation of a Drain log
+// template. Tokens are JSON-encoded to stay schema-simple across SQLite/
+// MySQL/PostgreSQL/MSSQL.
+//
+// ID is stored as int64 (bit-reinterpretation of the uint64 FNV-64 hash): the
+// standard SQL drivers reject uint64 values with the high bit set, and signed
+// int64 carries the same 64 bits without loss. Conversion happens in the
+// persistence helpers.
+type DrainTemplateRow struct {
+	ID        int64     `gorm:"primaryKey;autoIncrement:false" json:"id"` // int64(Template.ID)
+	Tokens    string    `gorm:"type:text;not null" json:"tokens"`         // JSON-encoded []string
+	Count     int       `json:"count"`
+	FirstSeen time.Time `gorm:"index" json:"first_seen"`
+	LastSeen  time.Time `gorm:"index" json:"last_seen"`
+	Sample    string    `gorm:"type:text" json:"sample"`
+}
+
+// TableName overrides GORM's default table name.
+func (DrainTemplateRow) TableName() string { return "drain_templates" }

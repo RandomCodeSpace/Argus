@@ -10,14 +10,14 @@ import (
 
 // handleGetStats handles GET /api/stats
 func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.repo.GetStats()
+	stats, err := s.repo.GetStats(r.Context())
 	if err != nil {
 		slog.Error("Failed to get DB stats", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
+	_ = json.NewEncoder(w).Encode(stats)
 }
 
 // handlePurge handles DELETE /api/admin/purge
@@ -49,7 +49,7 @@ func (s *Server) handlePurge(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Admin purge completed", "days", days, "logs_purged", logsDeleted, "traces_purged", tracesDeleted)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"logs_purged":   logsDeleted,
 		"traces_purged": tracesDeleted,
 		"cutoff":        cutoff,
@@ -64,5 +64,5 @@ func (s *Server) handleVacuum(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "vacuumed"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "vacuumed"})
 }

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+
+	"github.com/RandomCodeSpace/otelcontext/internal/api/views"
 )
 
 // handleGetTraces handles GET /api/traces
@@ -35,7 +37,7 @@ func (s *Server) handleGetTraces(w http.ResponseWriter, r *http.Request) {
 	sortBy := r.URL.Query().Get("sort_by")
 	orderBy := r.URL.Query().Get("order_by")
 
-	response, err := s.repo.GetTracesFiltered(start, end, serviceNames, status, search, limit, offset, sortBy, orderBy)
+	response, err := s.repo.GetTracesFiltered(r.Context(), start, end, serviceNames, status, search, limit, offset, sortBy, orderBy)
 	if err != nil {
 		slog.Error("Failed to get filtered traces", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -43,7 +45,7 @@ func (s *Server) handleGetTraces(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(views.TracesResponseFromModel(response))
 }
 
 // handleGetTraceByID handles GET /api/traces/{id}
@@ -54,13 +56,13 @@ func (s *Server) handleGetTraceByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	trace, err := s.repo.GetTrace(traceID)
+	trace, err := s.repo.GetTrace(r.Context(), traceID)
 	if err != nil {
-		slog.Error("Trace not found", "trace_id", traceID, "error", err)
+		slog.Error("Trace not found", "trace_id", traceID, "error", err) // #nosec G706 -- slog uses structured k/v fields
 		http.Error(w, "trace not found", http.StatusNotFound)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(trace)
+	_ = json.NewEncoder(w).Encode(views.TraceFromModel(*trace))
 }

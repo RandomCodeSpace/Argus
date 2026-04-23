@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,12 +54,16 @@ func NewService(repo *storage.Repository) *Service {
 
 	queueSize := 100
 	if qs := os.Getenv("AI_QUEUE_SIZE"); qs != "" {
-		fmt.Sscanf(qs, "%d", &queueSize)
+		if v, err := strconv.Atoi(qs); err == nil && v > 0 {
+			queueSize = v
+		}
 	}
 
 	workerPool := 3
 	if wp := os.Getenv("AI_WORKER_POOL"); wp != "" {
-		fmt.Sscanf(wp, "%d", &workerPool)
+		if v, err := strconv.Atoi(wp); err == nil && v > 0 {
+			workerPool = v
+		}
 	}
 
 	s := &Service{
@@ -132,7 +137,11 @@ func (s *Service) analyzeLog(ctx context.Context, l storage.Log) {
 		return
 	}
 
-	if err := s.repo.UpdateLogInsight(l.ID, insight); err != nil {
+	// UpdateLogInsight is tenant-scoped. The AI worker pool runs under
+	// context.Background(), so we reconstitute the tenant from the log itself
+	// before calling into the repository.
+	tenantCtx := storage.WithTenantContext(ctx, l.TenantID)
+	if err := s.repo.UpdateLogInsight(tenantCtx, l.ID, insight); err != nil {
 		log.Printf("Failed to save AI insight for log %d: %v", l.ID, err)
 	}
 }

@@ -22,7 +22,7 @@ func (m *Metrics) HealthWSHandler() http.HandlerFunc {
 			slog.Error("Health WS upgrade failed", "error", err)
 			return
 		}
-		defer conn.Close(websocket.StatusNormalClosure, "closing")
+		defer func() { _ = conn.Close(websocket.StatusNormalClosure, "closing") }()
 
 		// Track this connection in active_connections metric
 		m.IncrementActiveConns()

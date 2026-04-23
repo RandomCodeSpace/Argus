@@ -44,8 +44,26 @@ func (g *GraphRAG) snapshotLoop(ctx context.Context) {
 		case <-ticker.C:
 			g.takeSnapshot()
 			g.pruneOldSnapshots()
+			g.persistDrainTemplates()
 		}
 	}
+}
+
+// persistDrainTemplates saves the current Drain template set to the DB.
+// Called on each snapshot tick so a restart recovers the learned templates.
+func (g *GraphRAG) persistDrainTemplates() {
+	if g.repo == nil || g.repo.DB() == nil || g.drain == nil {
+		return
+	}
+	tpls := g.drain.Templates()
+	if len(tpls) == 0 {
+		return
+	}
+	if err := SaveDrainTemplates(g.repo.DB(), tpls); err != nil {
+		slog.Error("Failed to persist drain templates", "error", err)
+		return
+	}
+	slog.Debug("Drain templates persisted", "count", len(tpls))
 }
 
 // rebuildFromDB loads recent span data from the DB and merges into the graph.

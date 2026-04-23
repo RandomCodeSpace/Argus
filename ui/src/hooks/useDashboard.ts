@@ -15,8 +15,8 @@ export function useDashboard(pollInterval = 30_000) {
         fetch('/api/stats'),
       ]);
       if (!dRes.ok || !sRes.ok) throw new Error('fetch failed');
-      setDashboard(await dRes.json());
-      setStats(await sRes.json());
+      setDashboard((await dRes.json()) as DashboardStats);
+      setStats((await sRes.json()) as RepoStats);
       setError(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'fetch failed');

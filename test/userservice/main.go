@@ -59,7 +59,7 @@ func initTracer() func(context.Context) error {
 
 func main() {
 	shutdown := initTracer()
-	defer shutdown(context.Background())
+	defer func() { _ = shutdown(context.Background()) }()
 
 	tracer = otel.Tracer("user-service")
 
@@ -89,5 +89,5 @@ func handleUserFetch(w http.ResponseWriter, r *http.Request) {
 	time.Sleep(10 * time.Millisecond) // Fast response
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status": "active", "id": "usr_123"}`))
+	_, _ = w.Write([]byte(`{"status": "active", "id": "usr_123"}`))
 }

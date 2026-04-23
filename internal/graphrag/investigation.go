@@ -13,8 +13,8 @@ import (
 type Investigation struct {
 	ID               string          `gorm:"primaryKey;size:64" json:"id"`
 	CreatedAt        time.Time       `json:"created_at"`
-	Status           string          `gorm:"size:20" json:"status"`    // detected, triaged, resolved
-	Severity         string          `gorm:"size:20" json:"severity"`  // critical, warning, info
+	Status           string          `gorm:"size:20" json:"status"`   // detected, triaged, resolved
+	Severity         string          `gorm:"size:20" json:"severity"` // critical, warning, info
 	TriggerService   string          `gorm:"size:255;index" json:"trigger_service"`
 	TriggerOperation string          `gorm:"size:255" json:"trigger_operation"`
 	ErrorMessage     string          `gorm:"type:text" json:"error_message"`
@@ -35,7 +35,7 @@ func (Investigation) TableName() string {
 
 // AutoMigrateGraphRAG runs GORM auto-migration for GraphRAG models.
 func AutoMigrateGraphRAG(db *gorm.DB) error {
-	return db.AutoMigrate(&Investigation{}, &GraphSnapshot{})
+	return db.AutoMigrate(&Investigation{}, &GraphSnapshot{}, &DrainTemplateRow{})
 }
 
 // PersistInvestigation saves an investigation record from an error chain analysis.
@@ -165,4 +165,3 @@ func (g *GraphRAG) GetInvestigation(id string) (*Investigation, error) {
 	}
 	return &inv, nil
 }
-

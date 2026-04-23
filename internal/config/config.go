@@ -30,12 +30,8 @@ type Config struct {
 	DBMaxIdleConns    int
 	DBConnMaxLifetime string // e.g. "1h", "30m"
 
-	// Hot/Cold Storage
-	HotRetentionDays    int
-	ColdStoragePath     string
-	ColdStorageMaxGB    int
-	ArchiveScheduleHour int // 0-23, hour of day to run archival
-	ArchiveBatchSize    int
+	// Retention
+	HotRetentionDays int
 
 	// TSDB
 	TSDBRingBufferDuration string // e.g. "1h"
@@ -66,6 +62,45 @@ type Config struct {
 
 	// Vector Index
 	VectorIndexMaxEntries int
+
+	// TLS (HTTP + gRPC). When both paths are set, TLS is enabled on both servers.
+	// Empty values (default) keep plaintext behavior.
+	TLSCertFile string
+	TLSKeyFile  string
+
+	// TLSAutoSelfsigned enables zero-friction self-signed TLS bootstrap for dev /
+	// internal deployments. Ignored when TLSCertFile/TLSKeyFile are set (explicit
+	// cert-file mode wins). Generated material is cached under TLSCacheDir.
+	TLSAutoSelfsigned bool
+	TLSCacheDir       string
+
+	// API key authentication. When empty, auth middleware is a pass-through.
+	// Loaded from API_KEY env var — never logged.
+	APIKey string
+
+	// OTelExporterEndpoint enables self-instrumentation. When set, the platform
+	// exports its own spans to the configured OTLP endpoint (e.g. "localhost:4317"
+	// for self-ingest, or an external collector).
+	OTelExporterEndpoint string
+
+	// DefaultTenant is the tenant ID assigned to rows ingested without an explicit
+	// X-Tenant-ID header (HTTP) / x-tenant-id gRPC metadata.
+	DefaultTenant string
+
+	// OTLPTrustResourceTenant enables resolving the tenant from the OTLP
+	// `tenant.id` resource attribute when no transport-level tenant header
+	// was provided. Disabled by default because resource attributes are
+	// client-controlled — a compromised SDK could set tenant.id to forge
+	// another tenant's data. Only turn this on in closed environments where
+	// all OTLP producers are trusted.
+	OTLPTrustResourceTenant bool
+
+	// APITenantKeysFile, when non-empty, switches API auth from a single
+	// shared API_KEY into per-tenant bearer tokens. The file contains one
+	// `key=tenant` pair per line; the matched key's tenant OVERRIDES any
+	// X-Tenant-ID header so callers cannot cross tenants. Empty = disabled
+	// (legacy shared-key mode remains available for single-tenant dev).
+	APITenantKeysFile string
 
 	// DevMode disables origin checks for WebSocket and enables dev-friendly defaults.
 	// Derived from APP_ENV == "development".
@@ -109,12 +144,8 @@ func Load(customPath string) (*Config, error) {
 		DBMaxIdleConns:    getEnvInt("DB_MAX_IDLE_CONNS", 10),
 		DBConnMaxLifetime: getEnv("DB_CONN_MAX_LIFETIME", "1h"),
 
-		// Hot/Cold Storage
-		HotRetentionDays:    getEnvInt("HOT_RETENTION_DAYS", 7),
-		ColdStoragePath:     getEnv("COLD_STORAGE_PATH", "./data/cold"),
-		ColdStorageMaxGB:    getEnvInt("COLD_STORAGE_MAX_GB", 50),
-		ArchiveScheduleHour: getEnvInt("ARCHIVE_SCHEDULE_HOUR", 2),
-		ArchiveBatchSize:    getEnvInt("ARCHIVE_BATCH_SIZE", 10000),
+		// Retention
+		HotRetentionDays: getEnvInt("HOT_RETENTION_DAYS", 7),
 
 		// TSDB
 		TSDBRingBufferDuration: getEnv("TSDB_RING_BUFFER_DURATION", "1h"),
@@ -145,6 +176,23 @@ func Load(customPath string) (*Config, error) {
 
 		// Vector
 		VectorIndexMaxEntries: getEnvInt("VECTOR_INDEX_MAX_ENTRIES", 100000),
+
+		// TLS
+		TLSCertFile:       getEnv("TLS_CERT_FILE", ""),
+		TLSKeyFile:        getEnv("TLS_KEY_FILE", ""),
+		TLSAutoSelfsigned: parseTruthy(getEnv("TLS_AUTO_SELFSIGNED", "")),
+		TLSCacheDir:       getEnv("TLS_CACHE_DIR", "./data/tls"),
+
+		// Auth
+		APIKey: getEnv("API_KEY", ""),
+
+		// OTel self-instrumentation
+		OTelExporterEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+
+		// Multi-tenancy
+		DefaultTenant:           getEnv("DEFAULT_TENANT", "default"),
+		OTLPTrustResourceTenant: parseTruthy(getEnv("OTLP_TRUST_RESOURCE_TENANT", "")),
+		APITenantKeysFile:       getEnv("API_TENANT_KEYS_FILE", ""),
 	}, nil
 }
 
@@ -171,6 +219,17 @@ func getEnvFloat(key string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+// parseTruthy accepts common truthy spellings, case-insensitive, trimmed.
+// Used for env vars whose canonical value is `true` but where operators
+// often type `1`, `yes`, or `on`.
+func parseTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func getEnvBool(key string, fallback bool) bool {
@@ -204,12 +263,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid DB_DRIVER %q: must be one of sqlite, postgres, mysql, mssql", c.DBDriver)
 	}
 
-	// Numeric ranges
-	if c.HotRetentionDays < 1 {
-		return fmt.Errorf("HOT_RETENTION_DAYS must be >= 1, got %d", c.HotRetentionDays)
-	}
-	if c.ArchiveScheduleHour < 0 || c.ArchiveScheduleHour > 23 {
-		return fmt.Errorf("ARCHIVE_SCHEDULE_HOUR must be 0-23, got %d", c.ArchiveScheduleHour)
+	// Numeric ranges.
+	// Upper bound on HOT_RETENTION_DAYS guards against int64 nanosecond overflow in
+	// time.Duration(days) * 24 * time.Hour (overflow above ~106751 days flips the
+	// cutoff into the future and deletes everything). 36500 (100y) is generous.
+	if c.HotRetentionDays < 1 || c.HotRetentionDays > 36500 {
+		return fmt.Errorf("HOT_RETENTION_DAYS must be between 1 and 36500, got %d", c.HotRetentionDays)
 	}
 	if c.MetricMaxCardinality < 0 {
 		return fmt.Errorf("METRIC_MAX_CARDINALITY must be >= 0, got %d", c.MetricMaxCardinality)
@@ -234,5 +293,62 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid COMPRESSION_LEVEL %q: must be one of default, fast, best", c.CompressionLevel)
 	}
 
+	// Per-tenant API keys: warn loudly when the operator configured a non-
+	// default tenant but left API_TENANT_KEYS_FILE empty — the shared API_KEY
+	// + self-asserted X-Tenant-ID header model lets any key holder read any
+	// tenant's data, which is almost never what a multi-tenant install wants.
+	if c.APITenantKeysFile == "" && c.DefaultTenant != "" && c.DefaultTenant != "default" {
+		log.Printf("⚠️  API_TENANT_KEYS_FILE is empty but DEFAULT_TENANT=%q — shared API_KEY permits any holder to read any tenant's data. Set API_TENANT_KEYS_FILE to enforce per-tenant auth.", c.DefaultTenant)
+	}
+
+	// TLS: both paths must be set together, and both files must exist & be readable.
+	certSet := c.TLSCertFile != ""
+	keySet := c.TLSKeyFile != ""
+	if certSet != keySet {
+		return fmt.Errorf("TLS_CERT_FILE and TLS_KEY_FILE must both be set or both empty")
+	}
+	if certSet {
+		if err := checkReadable(c.TLSCertFile); err != nil {
+			return fmt.Errorf("TLS_CERT_FILE %q: %w", c.TLSCertFile, err)
+		}
+		if err := checkReadable(c.TLSKeyFile); err != nil {
+			return fmt.Errorf("TLS_KEY_FILE %q: %w", c.TLSKeyFile, err)
+		}
+		// Precedence notice: explicit cert files override auto-selfsigned.
+		if c.TLSAutoSelfsigned {
+			log.Println("ℹ️  TLS_AUTO_SELFSIGNED ignored — explicit TLS_CERT_FILE/TLS_KEY_FILE take precedence")
+		}
+	}
+
 	return nil
+}
+
+// TLSEnabled reports whether HTTPS + gRPC-TLS should be served using any
+// mode (explicit files or auto self-signed).
+func (c *Config) TLSEnabled() bool {
+	return c.TLSCertFileMode() || c.TLSSelfsignedMode()
+}
+
+// TLSCertFileMode reports whether explicit cert-file TLS is configured.
+// This path has precedence over self-signed.
+func (c *Config) TLSCertFileMode() bool {
+	return c.TLSCertFile != "" && c.TLSKeyFile != ""
+}
+
+// TLSSelfsignedMode reports whether the self-signed bootstrap path should
+// be used. False when explicit cert files are set (cert-file wins).
+func (c *Config) TLSSelfsignedMode() bool {
+	if c.TLSCertFileMode() {
+		return false
+	}
+	return c.TLSAutoSelfsigned
+}
+
+// checkReadable verifies the file exists and can be opened for reading.
+func checkReadable(path string) error {
+	f, err := os.Open(path) // #nosec G304 -- operator-supplied TLS material path
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }

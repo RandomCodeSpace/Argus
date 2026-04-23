@@ -1,14 +1,46 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/telemetry"
 	"gorm.io/gorm"
 )
+
+// likeOpFor returns the case-insensitive LIKE operator for the given driver.
+// Postgres LIKE is case-sensitive; SQLite/MySQL LIKE is case-insensitive by default.
+// Callers should embed the returned token directly into SQL fragments.
+func likeOpFor(driver string) string {
+	switch strings.ToLower(driver) {
+	case "postgres", "postgresql":
+		return "ILIKE"
+	default:
+		return "LIKE"
+	}
+}
+
+// likeOp returns the case-insensitive LIKE operator for this Repository's dialect.
+func (r *Repository) likeOp() string { return likeOpFor(r.driver) }
+
+// autoMigrateEnabled reports whether GORM AutoMigrate should run on startup.
+// Defaults to true; set DB_AUTOMIGRATE=false to run versioned migrations externally.
+func autoMigrateEnabled() bool {
+	v, ok := os.LookupEnv("DB_AUTOMIGRATE")
+	if !ok {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
 
 // Repository wraps the GORM database handle for all data access operations.
 type Repository struct {
@@ -32,25 +64,31 @@ func NewRepository(metrics *telemetry.Metrics) (*Repository, error) {
 		driver = "sqlite"
 	}
 
-	if err := AutoMigrateModels(db, driver); err != nil {
-		return nil, err
+	// Auto-migration is enabled by default. Disable via DB_AUTOMIGRATE=false when
+	// using versioned migrations in production (Postgres table locks, no rollback).
+	if autoMigrateEnabled() {
+		if err := AutoMigrateModels(db, driver); err != nil {
+			return nil, err
+		}
+	} else {
+		slog.Info("AutoMigrate skipped (DB_AUTOMIGRATE=false)")
 	}
 
 	// Register GORM Callback for DB Latency Metrics
 	if metrics != nil {
-		db.Callback().Query().Before("gorm:query").Register("telemetry:before_query", func(d *gorm.DB) {
+		_ = db.Callback().Query().Before("gorm:query").Register("telemetry:before_query", func(d *gorm.DB) {
 			d.Set("telemetry:start_time", time.Now())
 		})
-		db.Callback().Query().After("gorm:query").Register("telemetry:after_query", func(d *gorm.DB) {
+		_ = db.Callback().Query().After("gorm:query").Register("telemetry:after_query", func(d *gorm.DB) {
 			if start, ok := d.Get("telemetry:start_time"); ok {
 				duration := time.Since(start.(time.Time)).Seconds()
 				metrics.ObserveDBLatency(duration)
 			}
 		})
-		db.Callback().Create().Before("gorm:create").Register("telemetry:before_create", func(d *gorm.DB) {
+		_ = db.Callback().Create().Before("gorm:create").Register("telemetry:before_create", func(d *gorm.DB) {
 			d.Set("telemetry:start_time", time.Now())
 		})
-		db.Callback().Create().After("gorm:create").Register("telemetry:after_create", func(d *gorm.DB) {
+		_ = db.Callback().Create().After("gorm:create").Register("telemetry:after_create", func(d *gorm.DB) {
 			if start, ok := d.Get("telemetry:start_time"); ok {
 				duration := time.Since(start.(time.Time)).Seconds()
 				metrics.ObserveDBLatency(duration)
@@ -63,29 +101,33 @@ func NewRepository(metrics *telemetry.Metrics) (*Repository, error) {
 
 // Stats aggregation and DB management
 
-// GetStats returns high-level database stats.
-func (r *Repository) GetStats() (map[string]interface{}, error) {
+// GetStats returns high-level database stats scoped to the tenant carried on ctx.
+// Unscoped aggregates (DB size, etc.) are not tenant-specific and are reported as-is.
+func (r *Repository) GetStats(ctx context.Context) (map[string]any, error) {
+	tenant := TenantFromContext(ctx)
+	db := r.db.WithContext(ctx)
+
 	var traceCount int64
 	var logCount int64
 	var errorCount int64
 
-	if err := r.db.Model(&Trace{}).Count(&traceCount).Error; err != nil {
+	if err := db.Model(&Trace{}).Where("tenant_id = ?", tenant).Count(&traceCount).Error; err != nil {
 		return nil, fmt.Errorf("failed to count traces: %w", err)
 	}
 
-	if err := r.db.Model(&Log{}).Count(&logCount).Error; err != nil {
+	if err := db.Model(&Log{}).Where("tenant_id = ?", tenant).Count(&logCount).Error; err != nil {
 		return nil, fmt.Errorf("failed to count logs: %w", err)
 	}
 
-	if err := r.db.Model(&Log{}).Where("severity = ?", "ERROR").Count(&errorCount).Error; err != nil {
+	if err := db.Model(&Log{}).Where("tenant_id = ? AND severity = ?", tenant, "ERROR").Count(&errorCount).Error; err != nil {
 		return nil, fmt.Errorf("failed to count error logs: %w", err)
 	}
 
-	// Count distinct services across both logs and traces.
+	// Count distinct services across both logs and traces (tenant-scoped).
 	var serviceNames []string
-	r.db.Model(&Log{}).Distinct("service_name").Pluck("service_name", &serviceNames)
+	db.Model(&Log{}).Where("tenant_id = ?", tenant).Distinct("service_name").Pluck("service_name", &serviceNames)
 	traceServices := []string{}
-	r.db.Model(&Trace{}).Distinct("service_name").Pluck("service_name", &traceServices)
+	db.Model(&Trace{}).Where("tenant_id = ?", tenant).Distinct("service_name").Pluck("service_name", &traceServices)
 	serviceSet := make(map[string]struct{}, len(serviceNames)+len(traceServices))
 	for _, s := range serviceNames {
 		if s != "" {
@@ -107,7 +149,7 @@ func (r *Repository) GetStats() (map[string]interface{}, error) {
 		dbSizeMB = float64(pageCount*pageSize) / (1024 * 1024)
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"LogCount":     logCount,
 		"TraceCount":   traceCount,
 		"ErrorCount":   errorCount,
@@ -146,34 +188,46 @@ func (r *Repository) DB() *gorm.DB {
 	return r.db
 }
 
-// RecentTraces returns the most recent traces.
-func (r *Repository) RecentTraces(limit int) ([]Trace, error) {
+// NewRepositoryFromDB constructs a Repository from an existing *gorm.DB.
+// Intended for tests and advanced wiring — production code should use NewRepository.
+func NewRepositoryFromDB(db *gorm.DB, driver string) *Repository {
+	if driver == "" {
+		driver = "sqlite"
+	}
+	return &Repository{db: db, driver: driver}
+}
+
+// RecentTraces returns the most recent traces scoped to the tenant carried on ctx.
+func (r *Repository) RecentTraces(ctx context.Context, limit int) ([]Trace, error) {
+	tenant := TenantFromContext(ctx)
 	var traces []Trace
-	if err := r.db.Order("timestamp desc").Limit(limit).Find(&traces).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).Order("timestamp desc").Limit(limit).Find(&traces).Error; err != nil {
 		return nil, err
 	}
 	return traces, nil
 }
 
-// RecentLogs returns the most recent logs.
-func (r *Repository) RecentLogs(limit int) ([]Log, error) {
+// RecentLogs returns the most recent logs scoped to the tenant carried on ctx.
+func (r *Repository) RecentLogs(ctx context.Context, limit int) ([]Log, error) {
+	tenant := TenantFromContext(ctx)
 	var logs []Log
-	if err := r.db.Order("timestamp desc").Limit(limit).Find(&logs).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).Order("timestamp desc").Limit(limit).Find(&logs).Error; err != nil {
 		return nil, err
 	}
 	return logs, nil
 }
 
-// SearchLogs searches for logs based on query.
-func (r *Repository) SearchLogs(query string, limit int) ([]Log, error) {
+// SearchLogs searches for logs based on query, scoped to the tenant carried on ctx.
+func (r *Repository) SearchLogs(ctx context.Context, query string, limit int) ([]Log, error) {
+	tenant := TenantFromContext(ctx)
 	var logs []Log
-	db := r.db.Order("timestamp desc").Limit(limit)
+	db := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).Order("timestamp desc").Limit(limit)
 	if query != "" {
-		db = db.Where("body LIKE ? OR service_name LIKE ?", "%"+query+"%", "%"+query+"%")
+		op := r.likeOp()
+		db = db.Where(fmt.Sprintf("body %s ? OR service_name %s ?", op, op), "%"+query+"%", "%"+query+"%")
 	}
 	if err := db.Find(&logs).Error; err != nil {
 		return nil, err
 	}
 	return logs, nil
 }
-
