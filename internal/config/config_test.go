@@ -254,6 +254,45 @@ func TestTLSAutoSelfsigned_IgnoredWhenCertFilesSet(t *testing.T) {
 	}
 }
 
+func TestValidateDBForEnv_RefusesSQLiteInProduction(t *testing.T) {
+	c := baseValid()
+	c.DBDriver = "sqlite"
+	c.Env = "production"
+	c.AllowSqliteProd = false
+	err := c.ValidateDBForEnv()
+	if err == nil || !strings.Contains(err.Error(), "SQLite is unsuitable") {
+		t.Fatalf("expected SQLite-in-prod rejection, got %v", err)
+	}
+}
+
+func TestValidateDBForEnv_AllowsSQLiteWhenOptIn(t *testing.T) {
+	c := baseValid()
+	c.DBDriver = "sqlite"
+	c.Env = "production"
+	c.AllowSqliteProd = true
+	if err := c.ValidateDBForEnv(); err != nil {
+		t.Fatalf("opt-in should allow SQLite in prod, got %v", err)
+	}
+}
+
+func TestValidateDBForEnv_AllowsSQLiteInDev(t *testing.T) {
+	c := baseValid()
+	c.DBDriver = "sqlite"
+	c.Env = "development"
+	if err := c.ValidateDBForEnv(); err != nil {
+		t.Fatalf("SQLite in dev must pass, got %v", err)
+	}
+}
+
+func TestValidateDBForEnv_AllowsPostgresInProd(t *testing.T) {
+	c := baseValid()
+	c.DBDriver = "postgres"
+	c.Env = "production"
+	if err := c.ValidateDBForEnv(); err != nil {
+		t.Fatalf("Postgres in prod must pass, got %v", err)
+	}
+}
+
 func TestLoad_DefaultTenant_FallsBackToDefault(t *testing.T) {
 	// Ensure var is absent — Setenv("", "") would leave it set-but-empty, which
 	// the getEnv helper treats as a present value.

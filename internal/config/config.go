@@ -122,6 +122,11 @@ type Config struct {
 	// gRPC server tuning — protects against huge OTLP batches and connection abuse.
 	GRPCMaxRecvMB            int
 	GRPCMaxConcurrentStreams int
+
+	// AllowSqliteProd lets operators explicitly acknowledge that SQLite is
+	// being used outside dev/test. Without it, a production Env + SQLite
+	// combination refuses to start.
+	AllowSqliteProd bool
 }
 
 func Load(customPath string) (*Config, error) {
@@ -220,6 +225,9 @@ func Load(customPath string) (*Config, error) {
 		// gRPC server tuning
 		GRPCMaxRecvMB:            getEnvInt("GRPC_MAX_RECV_MB", 16),
 		GRPCMaxConcurrentStreams: getEnvInt("GRPC_MAX_CONCURRENT_STREAMS", 1000),
+
+		// Production safety guard for SQLite
+		AllowSqliteProd: parseTruthy(getEnv("OTELCONTEXT_ALLOW_SQLITE_PROD", "")),
 	}, nil
 }
 
@@ -395,4 +403,22 @@ func checkReadable(path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// ValidateDBForEnv refuses the combination of SQLite driver + production
+// environment unless AllowSqliteProd is explicitly set. SQLite's single-writer
+// lock caps sustained throughput to ~5 services; using it in production will
+// silently throttle ingestion.
+//
+// Call once during startup after Load + Validate.
+func (c *Config) ValidateDBForEnv() error {
+	if !strings.EqualFold(c.DBDriver, "sqlite") {
+		return nil
+	}
+	if strings.EqualFold(c.Env, "production") && !c.AllowSqliteProd {
+		return fmt.Errorf("SQLite is unsuitable for APP_ENV=production " +
+			"(single-writer lock caps throughput at ~5 services). " +
+			"Use DB_DRIVER=postgres, or set OTELCONTEXT_ALLOW_SQLITE_PROD=true to acknowledge")
+	}
+	return nil
 }

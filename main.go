@@ -135,6 +135,13 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		fatal("invalid configuration", err)
 	}
+	if err := cfg.ValidateDBForEnv(); err != nil {
+		fatal("DB/Env validation", err)
+	}
+	if strings.EqualFold(cfg.DBDriver, "sqlite") {
+		slog.Warn("SQLite driver in use — suitable for dev/small deployments only. " +
+			"Expected cap: ~5 services, ~1k events/sec sustained.")
+	}
 
 	// Initialize structured logger
 	var level slog.Level
