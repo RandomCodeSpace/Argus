@@ -24,7 +24,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc/metadata"
 )
 
 // operations is the fixed pool picked round-robin per producer.
@@ -51,9 +50,16 @@ func pickOperation(seq int) string {
 }
 
 // randomDuration returns a uniformly random duration in [5ms, 500ms].
+// Uses the shared global RNG; the hot-path variant is (*producer).randomDuration.
 func randomDuration() time.Duration {
 	// 5ms + [0, 495ms)
 	return time.Duration(5+rand.Intn(496)) * time.Millisecond
+}
+
+// randomDuration returns a uniformly random duration in [5ms, 500ms] using the
+// producer's private RNG (no cross-goroutine mutex contention).
+func (p *producer) randomDuration() time.Duration {
+	return time.Duration(5+p.rng.Intn(496)) * time.Millisecond
 }
 
 // isError returns true for approximately 5% of call sites (seq % 20 == 0).
@@ -118,6 +124,10 @@ type producer struct {
 	tp     *sdktrace.TracerProvider
 	tracer trace.Tracer
 
+	// rng is a per-producer RNG — avoids 200-goroutine contention on the global
+	// math/rand mutex in the hot path (duration, child count).
+	rng *rand.Rand
+
 	sentTotal  atomic.Int64
 	errorTotal atomic.Int64
 }
@@ -132,9 +142,7 @@ func newProducer(ctx context.Context, idx int, endpoint, tenantID string, insecu
 		opts = append(opts, otlptracegrpc.WithInsecure())
 	}
 	if tenantID != "" {
-		md := metadata.Pairs("x-tenant-id", tenantID)
 		opts = append(opts, otlptracegrpc.WithHeaders(map[string]string{"x-tenant-id": tenantID}))
-		_ = md // kept to document intent
 	}
 
 	client := otlptracegrpc.NewClient(opts...)
@@ -163,6 +171,7 @@ func newProducer(ctx context.Context, idx int, endpoint, tenantID string, insecu
 		insecure: insecure,
 		tp:       tp,
 		tracer:   tp.Tracer(svc),
+		rng:      rand.New(rand.NewSource(time.Now().UnixNano() + int64(idx))),
 	}, nil
 }
 
@@ -190,7 +199,7 @@ func (p *producer) run(ctx context.Context, rps int, dur time.Duration) {
 // emitSpan creates one span (with optional child spans every 10th call).
 func (p *producer) emitSpan(ctx context.Context, seq int) {
 	op := pickOperation(seq)
-	dur := randomDuration()
+	dur := p.randomDuration()
 	errored := isError(seq)
 
 	// Every 10th span: create a parent with 1–3 children in the same trace.
@@ -202,7 +211,7 @@ func (p *producer) emitSpan(ctx context.Context, seq int) {
 			p.errorTotal.Add(1)
 		}
 
-		numChildren := 1 + rand.Intn(3) // [1,3]
+		numChildren := 1 + p.rng.Intn(3) // [1,3]
 		for c := 0; c < numChildren; c++ {
 			childOp := pickOperation(seq + c + 1)
 			_, childSpan := p.tracer.Start(parentCtx, childOp)
@@ -241,10 +250,9 @@ func (p *producer) shutdown(timeout time.Duration) {
 // -------------------------------------------------------------------------
 
 type coordinator struct {
-	producers []*producer
 	startTime time.Time
 
-	totalSent  atomic.Int64
+	totalSent   atomic.Int64
 	totalErrors atomic.Int64
 }
 
@@ -308,7 +316,6 @@ func main() {
 			log.Fatalf("Failed to create producer %d: %v", i, err)
 		}
 		producers[i] = p
-		coord.producers = append(coord.producers, p)
 	}
 
 	// Stagger goroutine to roll out producers linearly over warmup window.
@@ -355,11 +362,12 @@ func main() {
 	go func() {
 		defer close(producersDone)
 		var pwg sync.WaitGroup
+	warmupLoop:
 		for i, p := range producers {
 			if i > 0 && staggerDelay > 0 {
 				select {
 				case <-ctx.Done():
-					break
+					break warmupLoop
 				case <-time.After(staggerDelay):
 				}
 			}
