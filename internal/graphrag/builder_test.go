@@ -121,3 +121,27 @@ func TestRefresh_PopulatesErrorCountFromDBStatus(t *testing.T) {
 		t.Fatalf("ErrorCount=%d after refresh, want >=1 — status not read from DB", svc.ErrorCount)
 	}
 }
+
+// TestOnSpanIngested_DropsIncrementMetric asserts that when the event
+// channel is full, OnSpanIngested records the drop via an atomic counter
+// (and — when wired — the otelcontext_graphrag_events_dropped_total
+// Prometheus metric).
+func TestOnSpanIngested_DropsIncrementMetric(t *testing.T) {
+	// Build a GraphRAG WITHOUT starting any event workers so the channel
+	// fills up and overflows.
+	g := New(nil, nil, nil, nil, DefaultConfig())
+	t.Cleanup(g.Stop)
+
+	// Fill the buffer well beyond capacity (default 10k).
+	for i := 0; i < 11000; i++ {
+		g.OnSpanIngested(storage.Span{
+			TraceID:     "t",
+			SpanID:      "s",
+			ServiceName: "x",
+			Status:      "STATUS_CODE_UNSET",
+		})
+	}
+	if got := g.DroppedSpansCount(); got == 0 {
+		t.Fatalf("expected drops > 0, got %d", got)
+	}
+}

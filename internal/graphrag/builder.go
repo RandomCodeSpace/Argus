@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
@@ -91,6 +92,53 @@ type GraphRAG struct {
 	refreshEvery  time.Duration
 	snapshotEvery time.Duration
 	anomalyEvery  time.Duration
+	workerCount   int // 0 = defaultWorkerCount (set by New from Config)
+
+	// Event drop counters. Atomic so OnSpanIngested/OnLogIngested/
+	// OnMetricIngested can record overflows without taking any lock —
+	// the channel-full path must stay hot-path cheap.
+	droppedSpans   atomic.Int64
+	droppedLogs    atomic.Int64
+	droppedMetrics atomic.Int64
+
+	// metrics is an optional Prometheus hook for exporting event drops.
+	// Assigned via SetMetrics; nil-safe at call sites.
+	metrics *telemetry.Metrics
+}
+
+// SetMetrics wires the Prometheus registry so GraphRAG event drops are
+// observable via otelcontext_graphrag_events_dropped_total. Safe to call
+// before Start; pass nil to disable Prometheus recording (atomic
+// counters still tick).
+func (g *GraphRAG) SetMetrics(m *telemetry.Metrics) { g.metrics = m }
+
+// DroppedSpansCount reports the number of span events dropped because
+// the ingestion channel was full. Exported for tests and readiness
+// probes; atomic, safe from any goroutine.
+func (g *GraphRAG) DroppedSpansCount() int64 { return g.droppedSpans.Load() }
+
+// DroppedLogsCount reports the number of log events dropped because
+// the ingestion channel was full.
+func (g *GraphRAG) DroppedLogsCount() int64 { return g.droppedLogs.Load() }
+
+// DroppedMetricsCount reports the number of metric events dropped
+// because the ingestion channel was full.
+func (g *GraphRAG) DroppedMetricsCount() int64 { return g.droppedMetrics.Load() }
+
+// recordEventDrop increments the per-signal atomic counter and — when
+// a telemetry registry is wired — the Prometheus counter vec.
+func (g *GraphRAG) recordEventDrop(signal string) {
+	switch signal {
+	case "span":
+		g.droppedSpans.Add(1)
+	case "log":
+		g.droppedLogs.Add(1)
+	case "metric":
+		g.droppedMetrics.Add(1)
+	}
+	if g.metrics != nil && g.metrics.GraphRAGEventsDroppedTotal != nil {
+		g.metrics.GraphRAGEventsDroppedTotal.WithLabelValues(signal).Inc()
+	}
 }
 
 // Config holds GraphRAG configuration.
@@ -152,6 +200,7 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 		refreshEvery:  cfg.RefreshEvery,
 		snapshotEvery: cfg.SnapshotEvery,
 		anomalyEvery:  cfg.AnomalyEvery,
+		workerCount:   cfg.WorkerCount,
 	}
 
 	// Restore persisted Drain templates so log clustering survives restarts.
@@ -173,8 +222,14 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 // Each goroutine is wrapped in a panic recovery so one misbehaving event
 // can't take down the whole subsystem.
 func (g *GraphRAG) Start(ctx context.Context) {
-	// Start event workers
-	for i := 0; i < defaultWorkerCount; i++ {
+	// Start event workers. Honor the configured worker count so operators
+	// can scale up under sustained high ingest; fall back to the package
+	// default when the constructor wasn't handed an override.
+	workers := g.workerCount
+	if workers <= 0 {
+		workers = defaultWorkerCount
+	}
+	for i := 0; i < workers; i++ {
 		go func() {
 			defer guardWorker("eventWorker")
 			g.eventWorker(ctx)
@@ -196,7 +251,7 @@ func (g *GraphRAG) Start(ctx context.Context) {
 	}()
 
 	slog.Info("GraphRAG started",
-		"workers", defaultWorkerCount,
+		"workers", workers,
 		"trace_ttl", g.traceTTL,
 		"refresh_every", g.refreshEvery,
 	)
@@ -252,7 +307,7 @@ func (g *GraphRAG) OnSpanIngested(span storage.Span) {
 	}}:
 	default:
 		// Channel full — graph is best-effort; DB is source of truth.
-		// Task 2 will add a drop counter here.
+		g.recordEventDrop("span")
 	}
 }
 
@@ -261,6 +316,8 @@ func (g *GraphRAG) OnLogIngested(log storage.Log) {
 	select {
 	case g.eventCh <- event{log: &logEvent{Log: log}}:
 	default:
+		// Channel full — graph is best-effort; DB is source of truth.
+		g.recordEventDrop("log")
 	}
 }
 
@@ -269,6 +326,8 @@ func (g *GraphRAG) OnMetricIngested(metric tsdb.RawMetric) {
 	select {
 	case g.eventCh <- event{metric: &metricEvent{Metric: metric}}:
 	default:
+		// Channel full — graph is best-effort; DB is source of truth.
+		g.recordEventDrop("metric")
 	}
 }
 

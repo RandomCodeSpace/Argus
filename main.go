@@ -336,10 +336,17 @@ func main() {
 
 	// 4g. Initialize GraphRAG (replaces simple graph for advanced queries)
 	graphrag.SetPanicMetrics(metrics)
-	graphRAG := graphrag.New(repo, vectorIdx, tsdbAgg, ringBuf, graphrag.DefaultConfig())
+	graphRAGCfg := graphrag.DefaultConfig()
+	graphRAGCfg.WorkerCount = cfg.GraphRAGWorkerCount
+	graphRAGCfg.ChannelSize = cfg.GraphRAGEventQueueSize
+	graphRAG := graphrag.New(repo, vectorIdx, tsdbAgg, ringBuf, graphRAGCfg)
+	graphRAG.SetMetrics(metrics)
 	ctxGraphRAG, cancelGraphRAG := context.WithCancel(context.Background())
 	go graphRAG.Start(ctxGraphRAG)
-	slog.Info("GraphRAG started (layered graph with anomaly detection)")
+	slog.Info("GraphRAG started (layered graph with anomaly detection)",
+		"workers", cfg.GraphRAGWorkerCount,
+		"event_queue_size", cfg.GraphRAGEventQueueSize,
+	)
 
 	// Auto-migrate GraphRAG models (Investigation, GraphSnapshot)
 	if err := graphrag.AutoMigrateGraphRAG(repo.DB()); err != nil {

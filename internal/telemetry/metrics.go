@@ -66,6 +66,9 @@ type Metrics struct {
 	RetentionConsecutiveFailures  *prometheus.GaugeVec
 	DBUp                          *prometheus.GaugeVec
 
+	// --- GraphRAG overflow ---
+	GraphRAGEventsDroppedTotal *prometheus.CounterVec
+
 	// Atomic counters for JSON health endpoint (avoids scraping Prometheus)
 	totalIngested  atomic.Int64
 	activeConns    atomic.Int64
@@ -233,6 +236,11 @@ func New() *Metrics {
 			Name: "OtelContext_db_up",
 			Help: "Database reachability (1=up, 0=down) by driver.",
 		}, []string{"driver"}),
+
+		GraphRAGEventsDroppedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "otelcontext_graphrag_events_dropped_total",
+			Help: "Events dropped because the GraphRAG event channel was full.",
+		}, []string{"signal"}),
 	}
 	return m
 }

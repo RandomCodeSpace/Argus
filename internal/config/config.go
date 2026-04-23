@@ -63,6 +63,13 @@ type Config struct {
 	// Vector Index
 	VectorIndexMaxEntries int
 
+	// GraphRAG worker count (background consumers of the ingestion event channel).
+	// Defaults to 4 if unset or <=0. Increase under sustained high ingest.
+	GraphRAGWorkerCount int
+
+	// GraphRAG event channel buffer size. Defaults to 10000 if unset or <=0.
+	GraphRAGEventQueueSize int
+
 	// TLS (HTTP + gRPC). When both paths are set, TLS is enabled on both servers.
 	// Empty values (default) keep plaintext behavior.
 	TLSCertFile string
@@ -176,6 +183,10 @@ func Load(customPath string) (*Config, error) {
 
 		// Vector
 		VectorIndexMaxEntries: getEnvInt("VECTOR_INDEX_MAX_ENTRIES", 100000),
+
+		// GraphRAG
+		GraphRAGWorkerCount:    getEnvInt("GRAPHRAG_WORKER_COUNT", 4),
+		GraphRAGEventQueueSize: getEnvInt("GRAPHRAG_EVENT_QUEUE_SIZE", 10000),
 
 		// TLS
 		TLSCertFile:       getEnv("TLS_CERT_FILE", ""),
