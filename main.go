@@ -256,6 +256,7 @@ func main() {
 		func() { metrics.DLQReplayFailure.Inc() },
 		func(b int64) { metrics.DLQDiskBytes.Set(float64(b)) },
 	)
+	dlq.SetTelemetryMetrics(metrics)
 	slog.Info("🔁 DLQ initialized", "path", cfg.DLQPath, "interval", replayInterval)
 
 	// 4. Initialize Real-Time WebSocket Hub

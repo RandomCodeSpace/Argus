@@ -78,6 +78,10 @@ type Metrics struct {
 	DBPoolWaitCount       prometheus.Gauge
 	DBPoolWaitDuration    prometheus.Gauge // cumulative seconds
 
+	// --- DLQ eviction (Task 8) ---
+	DLQEvictedTotal      prometheus.Counter
+	DLQEvictedBytesTotal prometheus.Counter
+
 	// Atomic counters for JSON health endpoint (avoids scraping Prometheus)
 	totalIngested  atomic.Int64
 	activeConns    atomic.Int64
@@ -277,6 +281,14 @@ func New() *Metrics {
 			Help: "Cumulative wait duration for pool acquisition, in seconds (gauge-reported; compute rate() over this value).",
 		}),
 	}
+	m.DLQEvictedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "otelcontext_dlq_evicted_total",
+		Help: "DLQ files evicted to stay under MaxFiles/MaxDiskMB. Non-zero means backlog exceeds cap — investigate DB health.",
+	})
+	m.DLQEvictedBytesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "otelcontext_dlq_evicted_bytes_total",
+		Help: "Total bytes evicted from DLQ. Rate indicates data-loss volume during backlog.",
+	})
 	return m
 }
 
