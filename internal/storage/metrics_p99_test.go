@@ -135,60 +135,43 @@ func TestP99_SQLite_SingleRow(t *testing.T) {
 // Step 3b: Large-data / cap test
 // ---------------------------------------------------------------------------
 
-// TestP99_SQLite_LargeData inserts rows beyond sqliteP99RowCap and verifies:
+// TestP99_SQLite_CapTriggers temporarily shrinks sqliteP99RowCap and inserts
+// just over that amount, verifying the cap path is exercised:
 //  1. GetDashboardStats returns without error.
-//  2. P99Latency is non-zero and the result is plausible.
-//  3. The call completes within a reasonable time budget (5s).
+//  2. P99Latency is non-zero.
+//  3. The call completes quickly (small dataset).
 //
-// NOTE: Before the implementation, this test may pass (just slowly) because
-// the original code does an in-memory sort of all rows. After the
-// implementation the cap limits how many rows are fetched.
-func TestP99_SQLite_LargeData(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping large-data test in -short mode")
-	}
+// The cap is a var specifically so this test can run under -race without
+// seeding 200k rows. Default cap remains 200_000 in production.
+func TestP99_SQLite_CapTriggers(t *testing.T) {
+	orig := sqliteP99RowCap
+	sqliteP99RowCap = 200
+	t.Cleanup(func() { sqliteP99RowCap = orig })
 
 	repo := newTestRepo(t)
 	now := time.Now().UTC()
 
-	const insertCount = sqliteP99RowCap + 5000 // just over the cap
+	insertCount := sqliteP99RowCap + 50 // just over the (shrunk) cap
 
-	// Insert in batches for speed.
-	batch := make([]Trace, 0, 2000)
+	batch := make([]Trace, 0, insertCount)
 	for i := 0; i < insertCount; i++ {
 		batch = append(batch, Trace{
 			TraceID:     "t" + p99Itoa(i),
 			ServiceName: "svc",
-			Duration:    int64(i + 1), // durations 1..insertCount
+			Duration:    int64(i + 1),
 			Status:      "OK",
 			Timestamp:   now,
 			TenantID:    "default",
 		})
-		if len(batch) == 2000 || i == insertCount-1 {
-			if err := repo.db.CreateInBatches(batch, 2000).Error; err != nil {
-				t.Fatalf("seed batch: %v", err)
-			}
-			batch = batch[:0]
-		}
+	}
+	if err := repo.db.CreateInBatches(batch, 100).Error; err != nil {
+		t.Fatalf("seed batch: %v", err)
 	}
 
 	ctx := context.Background()
-	done := make(chan struct{})
-	var stats *DashboardStats
-	var statsErr error
-	go func() {
-		stats, statsErr = repo.GetDashboardStats(ctx, now.Add(-time.Hour), now.Add(time.Hour), nil)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("GetDashboardStats exceeded 5s budget with large dataset")
-	}
-
-	if statsErr != nil {
-		t.Fatalf("GetDashboardStats: %v", statsErr)
+	stats, err := repo.GetDashboardStats(ctx, now.Add(-time.Hour), now.Add(time.Hour), nil)
+	if err != nil {
+		t.Fatalf("GetDashboardStats: %v", err)
 	}
 	if stats.P99Latency <= 0 {
 		t.Fatalf("P99Latency should be positive, got %d", stats.P99Latency)

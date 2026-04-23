@@ -15,7 +15,9 @@ import (
 // sqliteP99RowCap is the maximum number of duration rows fetched for the
 // in-memory p99 sort on SQLite. Queries returning more rows than this are
 // capped with a warning; accuracy degrades gracefully at the tail.
-const sqliteP99RowCap = 200_000
+// Declared as var (not const) so tests can temporarily shrink it to exercise
+// the cap path without seeding 200k rows under -race.
+var sqliteP99RowCap = 200_000
 
 // TrafficPoint represents a data point for the traffic chart.
 type TrafficPoint struct {
