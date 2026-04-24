@@ -77,7 +77,7 @@ func (g *GraphRAG) persistDrainTemplates() {
 	if len(tpls) == 0 {
 		return
 	}
-	if err := SaveDrainTemplates(g.repo.DB(), tpls); err != nil {
+	if err := SaveDrainTemplates(g.repo.DB(), storage.DefaultTenantID, tpls); err != nil {
 		slog.Error("Failed to persist drain templates", "error", err)
 		return
 	}

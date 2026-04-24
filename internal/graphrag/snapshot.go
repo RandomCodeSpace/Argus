@@ -12,14 +12,14 @@ import (
 
 // GraphSnapshot is a periodic snapshot of the service topology persisted to DB.
 //
-// Tenant identity is not yet a column on this model — Subtask B (RAN-38) adds
-// `tenant_id` to the schema along with the persistence-layer filtering. For
-// now, snapshots are written one row per tenant per tick and remain queryable
-// only across the whole table; callers must not treat pre-Subtask-B rows as
-// tenant-scoped.
+// TenantID scopes the row to the tenant slice it was captured from. The
+// composite (tenant_id, created_at) index supports the
+// "most recent snapshot at-or-before T for tenant X" lookup that
+// GetGraphSnapshot runs on every read.
 type GraphSnapshot struct {
+	TenantID       string          `gorm:"size:64;default:'default';not null;index:idx_graph_snapshots_tenant_created,priority:1" json:"tenant_id"`
 	ID             string          `gorm:"primaryKey;size:64" json:"id"`
-	CreatedAt      time.Time       `json:"created_at"`
+	CreatedAt      time.Time       `gorm:"index:idx_graph_snapshots_tenant_created,priority:2" json:"created_at"`
 	Nodes          json.RawMessage `gorm:"type:text" json:"nodes"`
 	Edges          json.RawMessage `gorm:"type:text" json:"edges"`
 	ServiceCount   int             `json:"service_count"`
@@ -117,6 +117,7 @@ func (g *GraphRAG) takeSnapshotForTenant(_ context.Context, tenant string, store
 	edgesJSON, _ := json.Marshal(snapEdges)
 
 	snap := GraphSnapshot{
+		TenantID:       tenant,
 		ID:             fmt.Sprintf("snap_%s_%d", tenant, time.Now().UnixNano()),
 		CreatedAt:      time.Now(),
 		Nodes:          nodesJSON,
@@ -155,12 +156,14 @@ func (g *GraphRAG) pruneOldSnapshots() {
 	}
 }
 
-// GetGraphSnapshot retrieves the snapshot closest to the requested time.
-// TODO(RAN-38, Subtask B): scope by tenant once tenant_id lands on the table.
-func (g *GraphRAG) GetGraphSnapshot(at time.Time) (*GraphSnapshot, error) {
+// GetGraphSnapshot retrieves the snapshot closest to the requested time,
+// scoped to the tenant carried by ctx. The composite (tenant_id, created_at)
+// index supports the descending lookup.
+func (g *GraphRAG) GetGraphSnapshot(ctx context.Context, at time.Time) (*GraphSnapshot, error) {
+	tenant := storage.TenantFromContext(ctx)
 	var snap GraphSnapshot
 	err := g.repo.DB().
-		Where("created_at <= ?", at).
+		Where("tenant_id = ? AND created_at <= ?", tenant, at).
 		Order("created_at DESC").
 		First(&snap).Error
 	if err != nil {

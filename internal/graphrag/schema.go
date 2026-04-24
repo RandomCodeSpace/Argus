@@ -222,7 +222,13 @@ type RankedCause struct {
 // standard SQL drivers reject uint64 values with the high bit set, and signed
 // int64 carries the same 64 bits without loss. Conversion happens in the
 // persistence helpers.
+//
+// The primary key is composite (tenant_id, id): the same template tokens can
+// legitimately recur across tenants, and we want the cluster ID to stay stable
+// per tenant once the in-memory Drain miner is partitioned per-tenant. TenantID
+// is declared first so it leads the PK index.
 type DrainTemplateRow struct {
+	TenantID  string    `gorm:"primaryKey;size:64;default:'default';not null" json:"tenant_id"`
 	ID        int64     `gorm:"primaryKey;autoIncrement:false" json:"id"` // int64(Template.ID)
 	Tokens    string    `gorm:"type:text;not null" json:"tokens"`         // JSON-encoded []string
 	Count     int       `json:"count"`

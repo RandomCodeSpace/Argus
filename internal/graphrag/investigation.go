@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
-	"gorm.io/gorm"
 )
 
 // investigationCooldown suppresses repeated PersistInvestigation calls with
@@ -43,13 +42,14 @@ func (c *investigationCooldown) allow(key string, now time.Time) bool {
 }
 
 // cooldownKey builds a case- and whitespace-insensitive key from the tuple
-// (trigger_service, root_service, root_operation). Service names emitted
-// from different instrumentations occasionally differ in casing or have
-// trailing whitespace; canonicalizing here prevents those variants from
-// bypassing the cooldown guard.
-func cooldownKey(triggerService, rootService, rootOperation string) string {
+// (tenant, trigger_service, root_service, root_operation). Tenant scopes the
+// guard so an error in tenant-A doesn't suppress the same error pattern in
+// tenant-B. Service names emitted from different instrumentations occasionally
+// differ in casing or have trailing whitespace; canonicalizing here prevents
+// those variants from bypassing the cooldown guard.
+func cooldownKey(tenant, triggerService, rootService, rootOperation string) string {
 	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
-	return norm(triggerService) + "|" + norm(rootService) + "|" + norm(rootOperation)
+	return norm(tenant) + "|" + norm(triggerService) + "|" + norm(rootService) + "|" + norm(rootOperation)
 }
 
 // prune drops entries older than cutoff to bound map size. Called from
@@ -65,9 +65,14 @@ func (c *investigationCooldown) prune(cutoff time.Time) {
 }
 
 // Investigation is a persisted record of an automated error investigation.
+//
+// TenantID scopes the row to its originating tenant. The composite
+// (tenant_id, created_at) index supports the recency-ordered "investigations
+// for tenant X" query that GetInvestigations runs on every read.
 type Investigation struct {
+	TenantID         string          `gorm:"size:64;default:'default';not null;index:idx_investigations_tenant_created,priority:1" json:"tenant_id"`
 	ID               string          `gorm:"primaryKey;size:64" json:"id"`
-	CreatedAt        time.Time       `json:"created_at"`
+	CreatedAt        time.Time       `gorm:"index:idx_investigations_tenant_created,priority:2" json:"created_at"`
 	Status           string          `gorm:"size:20" json:"status"`   // detected, triaged, resolved
 	Severity         string          `gorm:"size:20" json:"severity"` // critical, warning, info
 	TriggerService   string          `gorm:"size:255;index" json:"trigger_service"`
@@ -88,19 +93,16 @@ func (Investigation) TableName() string {
 	return "investigations"
 }
 
-// AutoMigrateGraphRAG runs GORM auto-migration for GraphRAG models.
-func AutoMigrateGraphRAG(db *gorm.DB) error {
-	return db.AutoMigrate(&Investigation{}, &GraphSnapshot{}, &DrainTemplateRow{})
-}
-
 // PersistInvestigation saves an investigation record from an error chain
 // analysis. Tenant is accepted explicitly so the caller (the per-tenant
-// anomaly loop) can re-enter ImpactAnalysis on the correct tenant slice. The
-// `investigations` table itself does not yet carry a tenant_id column —
-// Subtask B (RAN-38) owns that migration.
+// anomaly loop) can re-enter ImpactAnalysis on the correct tenant slice and so
+// the persisted row carries its originating tenant_id.
 func (g *GraphRAG) PersistInvestigation(tenant, triggerService string, chains []ErrorChainResult, anomalies []*AnomalyNode) {
 	if len(chains) == 0 {
 		return
+	}
+	if tenant == "" {
+		tenant = storage.DefaultTenantID
 	}
 
 	firstChain := chains[0]
@@ -111,10 +113,12 @@ func (g *GraphRAG) PersistInvestigation(tenant, triggerService string, chains []
 	now := time.Now()
 
 	// Cooldown: suppress repeat investigations for the same
-	// (trigger_service, root_service, root_operation) inside a sliding window.
-	// Keys are canonicalized (lower + trim) so "Orders" and "orders " share a
-	// bucket — otherwise trivial casing differences would bypass the guard.
-	key := cooldownKey(triggerService, firstChain.RootCause.Service, firstChain.RootCause.Operation)
+	// (tenant, trigger_service, root_service, root_operation) inside a sliding
+	// window. Keys are canonicalized (lower + trim) so "Orders" and "orders "
+	// share a bucket — otherwise trivial casing differences would bypass the
+	// guard. Tenant scoping prevents an error in one tenant from suppressing
+	// the same pattern in another.
+	key := cooldownKey(tenant, triggerService, firstChain.RootCause.Service, firstChain.RootCause.Operation)
 	if g.invCooldown != nil && !g.invCooldown.allow(key, now) {
 		return
 	}
@@ -180,6 +184,7 @@ func (g *GraphRAG) PersistInvestigation(tenant, triggerService string, chains []
 	}
 
 	inv := Investigation{
+		TenantID:         tenant,
 		ID:               id,
 		CreatedAt:        now,
 		Status:           "detected",
@@ -202,15 +207,17 @@ func (g *GraphRAG) PersistInvestigation(tenant, triggerService string, chains []
 		return
 	}
 	if err := g.repo.DB().Create(&inv).Error; err != nil {
-		slog.Error("Failed to persist investigation", "error", err)
+		slog.Error("Failed to persist investigation", "tenant", tenant, "error", err)
 		return
 	}
 
-	slog.Info("Investigation persisted", "id", id, "service", triggerService, "severity", severity)
+	slog.Info("Investigation persisted", "id", id, "tenant", tenant, "service", triggerService, "severity", severity)
 }
 
-// GetInvestigations queries persisted investigations.
-func (g *GraphRAG) GetInvestigations(service, severity, status string, limit int) ([]Investigation, error) {
+// GetInvestigations queries persisted investigations scoped to the tenant
+// carried by ctx. The composite (tenant_id, created_at) index supports the
+// recency-ordered scan.
+func (g *GraphRAG) GetInvestigations(ctx context.Context, service, severity, status string, limit int) ([]Investigation, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -218,7 +225,12 @@ func (g *GraphRAG) GetInvestigations(service, severity, status string, limit int
 		limit = 100
 	}
 
-	db := g.repo.DB().Model(&Investigation{}).Order("created_at DESC").Limit(limit)
+	tenant := storage.TenantFromContext(ctx)
+	db := g.repo.DB().
+		Model(&Investigation{}).
+		Where("tenant_id = ?", tenant).
+		Order("created_at DESC").
+		Limit(limit)
 	if service != "" {
 		db = db.Where("trigger_service = ? OR root_service = ?", service, service)
 	}
@@ -236,10 +248,13 @@ func (g *GraphRAG) GetInvestigations(service, severity, status string, limit int
 	return investigations, nil
 }
 
-// GetInvestigation retrieves a single investigation by ID.
-func (g *GraphRAG) GetInvestigation(id string) (*Investigation, error) {
+// GetInvestigation retrieves a single investigation by ID, scoped to the
+// tenant carried by ctx. Returning ErrRecordNotFound for cross-tenant lookups
+// prevents id-guessing from leaking another tenant's row.
+func (g *GraphRAG) GetInvestigation(ctx context.Context, id string) (*Investigation, error) {
+	tenant := storage.TenantFromContext(ctx)
 	var inv Investigation
-	if err := g.repo.DB().Where("id = ?", id).First(&inv).Error; err != nil {
+	if err := g.repo.DB().Where("tenant_id = ? AND id = ?", tenant, id).First(&inv).Error; err != nil {
 		return nil, err
 	}
 	return &inv, nil
