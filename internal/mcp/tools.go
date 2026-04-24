@@ -320,11 +320,11 @@ func (s *Server) toolHandler(ctx context.Context, name string, args map[string]a
 	case "correlated_signals":
 		return s.toolCorrelatedSignals(ctx, args)
 	case "get_investigations":
-		return s.toolGetInvestigations(args)
+		return s.toolGetInvestigations(ctx, args)
 	case "get_investigation":
-		return s.toolGetInvestigationByID(args)
+		return s.toolGetInvestigationByID(ctx, args)
 	case "get_graph_snapshot":
-		return s.toolGetGraphSnapshot(args)
+		return s.toolGetGraphSnapshot(ctx, args)
 	case "get_anomaly_timeline":
 		return s.toolGetAnomalyTimeline(ctx, args)
 	default:
@@ -752,7 +752,7 @@ func (s *Server) toolCorrelatedSignals(ctx context.Context, args map[string]any)
 	return textResult(string(data))
 }
 
-func (s *Server) toolGetInvestigations(args map[string]any) ToolCallResult {
+func (s *Server) toolGetInvestigations(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
 		return errorResult("GraphRAG not initialized")
 	}
@@ -761,7 +761,7 @@ func (s *Server) toolGetInvestigations(args map[string]any) ToolCallResult {
 	status, _ := args["status"].(string)
 	limit := argInt(args, "limit", 20)
 
-	investigations, err := s.graphRAG.GetInvestigations(service, severity, status, limit)
+	investigations, err := s.graphRAG.GetInvestigations(ctx, service, severity, status, limit)
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to query investigations: %v", err))
 	}
@@ -772,7 +772,7 @@ func (s *Server) toolGetInvestigations(args map[string]any) ToolCallResult {
 	return textResult(string(data))
 }
 
-func (s *Server) toolGetInvestigationByID(args map[string]any) ToolCallResult {
+func (s *Server) toolGetInvestigationByID(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
 		return errorResult("GraphRAG not initialized")
 	}
@@ -780,7 +780,7 @@ func (s *Server) toolGetInvestigationByID(args map[string]any) ToolCallResult {
 	if id == "" {
 		return errorResult("investigation_id is required")
 	}
-	inv, err := s.graphRAG.GetInvestigation(id)
+	inv, err := s.graphRAG.GetInvestigation(ctx, id)
 	if err != nil {
 		return errorResult(fmt.Sprintf("investigation not found: %v", err))
 	}
@@ -791,7 +791,7 @@ func (s *Server) toolGetInvestigationByID(args map[string]any) ToolCallResult {
 	return textResult(string(data))
 }
 
-func (s *Server) toolGetGraphSnapshot(args map[string]any) ToolCallResult {
+func (s *Server) toolGetGraphSnapshot(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
 		return errorResult("GraphRAG not initialized")
 	}
@@ -800,7 +800,7 @@ func (s *Server) toolGetGraphSnapshot(args map[string]any) ToolCallResult {
 	if at.IsZero() {
 		at = time.Now()
 	}
-	snap, err := s.graphRAG.GetGraphSnapshot(at)
+	snap, err := s.graphRAG.GetGraphSnapshot(ctx, at)
 	if err != nil {
 		return errorResult(fmt.Sprintf("no snapshot found: %v", err))
 	}
