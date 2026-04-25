@@ -238,8 +238,13 @@ func New(repo *storage.Repository, vectorIdx *vectordb.Index, tsdbAgg *tsdb.Aggr
 	// Restore persisted Drain templates so log clustering survives restarts.
 	// A missing table (fresh install) or transient DB error is non-fatal —
 	// ingestion will rebuild templates from scratch.
+	//
+	// The Drain miner is currently a single shared instance, so we treat its
+	// learned templates as belonging to DefaultTenantID. The persistence layer
+	// is already keyed by (tenant_id, id) so a future per-tenant Drain miner
+	// can load each tenant's slice without colliding cluster IDs.
 	if repo != nil && repo.DB() != nil {
-		if tpls, err := LoadDrainTemplates(repo.DB()); err != nil {
+		if tpls, err := LoadDrainTemplates(repo.DB(), storage.DefaultTenantID); err != nil {
 			slog.Info("GraphRAG: drain template restore skipped", "reason", err)
 		} else if len(tpls) > 0 {
 			g.drain.LoadTemplates(tpls)
@@ -294,7 +299,7 @@ func (g *GraphRAG) Stop() {
 	// Best-effort final Drain template persistence — losing the most recent
 	// updates on an unclean shutdown would force rebuilding from scratch.
 	if g.repo != nil && g.repo.DB() != nil && g.drain != nil {
-		if err := SaveDrainTemplates(g.repo.DB(), g.drain.Templates()); err != nil {
+		if err := SaveDrainTemplates(g.repo.DB(), storage.DefaultTenantID, g.drain.Templates()); err != nil {
 			slog.Warn("GraphRAG: final drain template save failed", "error", err)
 		}
 	}

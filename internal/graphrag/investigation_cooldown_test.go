@@ -46,18 +46,30 @@ func TestPersistInvestigation_Cooldown(t *testing.T) {
 }
 
 // TestCooldownKey_Canonical verifies the key normalizes case and trims
-// whitespace so "Orders" / "orders " / "ORDERS" land in the same bucket.
+// whitespace so "Orders" / "orders " / "ORDERS" land in the same bucket
+// within a tenant.
 func TestCooldownKey_Canonical(t *testing.T) {
-	cases := [][3]string{
-		{"orders", "orders", "op"},
-		{"Orders", "ORDERS", "op"},
-		{" orders ", "orders", " op "},
-		{"ORDERS", "Orders ", "OP"},
+	cases := [][4]string{
+		{"acme", "orders", "orders", "op"},
+		{"Acme", "Orders", "ORDERS", "op"},
+		{" acme ", " orders ", "orders", " op "},
+		{"ACME", "ORDERS", "Orders ", "OP"},
 	}
-	want := cooldownKey(cases[0][0], cases[0][1], cases[0][2])
+	want := cooldownKey(cases[0][0], cases[0][1], cases[0][2], cases[0][3])
 	for _, c := range cases[1:] {
-		if got := cooldownKey(c[0], c[1], c[2]); got != want {
+		if got := cooldownKey(c[0], c[1], c[2], c[3]); got != want {
 			t.Errorf("cooldownKey%v = %q, want %q", c, got, want)
 		}
+	}
+}
+
+// TestCooldownKey_TenantIsolated asserts that two tenants emitting the same
+// (trigger, root, op) tuple produce distinct cooldown keys, so an error in
+// tenant-A doesn't suppress the same pattern in tenant-B.
+func TestCooldownKey_TenantIsolated(t *testing.T) {
+	a := cooldownKey("tenant-a", "orders", "orders", "op")
+	b := cooldownKey("tenant-b", "orders", "orders", "op")
+	if a == b {
+		t.Fatalf("tenant scoping missing: tenant-a and tenant-b share key %q", a)
 	}
 }

@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -504,12 +505,19 @@ func (d *Drain) Len() int {
 // --- Persistence ---
 
 // SaveDrainTemplates upserts the given templates into the drain_templates
-// table. Tokens are JSON-encoded. Uses GORM's clause.OnConflict upsert which
-// is dialect-aware (ON CONFLICT for SQLite/PostgreSQL, ON DUPLICATE KEY
-// UPDATE for MySQL).
-func SaveDrainTemplates(db *gorm.DB, templates []Template) error {
+// table under the supplied tenant. Tokens are JSON-encoded. Uses GORM's
+// clause.OnConflict upsert which is dialect-aware (ON CONFLICT for SQLite/
+// PostgreSQL, ON DUPLICATE KEY UPDATE for MySQL).
+//
+// The conflict target is the composite (tenant_id, id) primary key so the
+// same Drain template hash can coexist across tenants — a future per-tenant
+// Drain miner can rely on this to keep cluster IDs stable per tenant.
+func SaveDrainTemplates(db *gorm.DB, tenant string, templates []Template) error {
 	if db == nil || len(templates) == 0 {
 		return nil
+	}
+	if tenant == "" {
+		tenant = storage.DefaultTenantID
 	}
 	rows := make([]DrainTemplateRow, 0, len(templates))
 	for _, t := range templates {
@@ -518,6 +526,7 @@ func SaveDrainTemplates(db *gorm.DB, templates []Template) error {
 			return fmt.Errorf("marshal drain tokens id=%d: %w", t.ID, err)
 		}
 		rows = append(rows, DrainTemplateRow{
+			TenantID:  tenant,
 			ID:        int64(t.ID), //nolint:gosec // intentional bit-reinterpret of FNV-64 hash for DB portability
 			Tokens:    string(tokensJSON),
 			Count:     t.Count,
@@ -527,22 +536,25 @@ func SaveDrainTemplates(db *gorm.DB, templates []Template) error {
 		})
 	}
 	return db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "id"}},
+		Columns: []clause.Column{{Name: "tenant_id"}, {Name: "id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"tokens", "count", "last_seen", "sample",
 		}),
 	}).CreateInBatches(&rows, 500).Error
 }
 
-// LoadDrainTemplates reads all persisted Drain templates from the DB and
-// returns them in a format ready to pass to Drain.LoadTemplates. Returns an
-// empty slice (and nil error) if the table is empty.
-func LoadDrainTemplates(db *gorm.DB) ([]Template, error) {
+// LoadDrainTemplates reads persisted Drain templates for the supplied tenant
+// and returns them in a format ready to pass to Drain.LoadTemplates. Returns
+// an empty slice (and nil error) if no rows match.
+func LoadDrainTemplates(db *gorm.DB, tenant string) ([]Template, error) {
 	if db == nil {
 		return nil, nil
 	}
+	if tenant == "" {
+		tenant = storage.DefaultTenantID
+	}
 	var rows []DrainTemplateRow
-	if err := db.Find(&rows).Error; err != nil {
+	if err := db.Where("tenant_id = ?", tenant).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]Template, 0, len(rows))

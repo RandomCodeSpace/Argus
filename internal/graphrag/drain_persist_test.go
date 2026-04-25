@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
@@ -50,12 +51,12 @@ func TestDrainPersistence_RoundTrip(t *testing.T) {
 	}
 
 	// Persist.
-	if err := SaveDrainTemplates(db, d1.Templates()); err != nil {
+	if err := SaveDrainTemplates(db, storage.DefaultTenantID, d1.Templates()); err != nil {
 		t.Fatalf("SaveDrainTemplates: %v", err)
 	}
 
 	// Reload.
-	loaded, err := LoadDrainTemplates(db)
+	loaded, err := LoadDrainTemplates(db, storage.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("LoadDrainTemplates: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestDrainPersistence_Upsert(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		d.Match(fmt.Sprintf("upsert kind %c event", 'a'+byte(i)), t0)
 	}
-	if err := SaveDrainTemplates(db, d.Templates()); err != nil {
+	if err := SaveDrainTemplates(db, storage.DefaultTenantID, d.Templates()); err != nil {
 		t.Fatalf("first save: %v", err)
 	}
 
@@ -108,7 +109,7 @@ func TestDrainPersistence_Upsert(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		d.Match(fmt.Sprintf("upsert kind %c event", 'a'+byte(i)), t1)
 	}
-	if err := SaveDrainTemplates(db, d.Templates()); err != nil {
+	if err := SaveDrainTemplates(db, storage.DefaultTenantID, d.Templates()); err != nil {
 		t.Fatalf("second save: %v", err)
 	}
 
@@ -139,7 +140,7 @@ func TestDrainPersistence_Upsert(t *testing.T) {
 // returns an empty slice and nil error (fresh-install path).
 func TestDrainPersistence_EmptyDB(t *testing.T) {
 	db := newTestDrainDB(t)
-	tpls, err := LoadDrainTemplates(db)
+	tpls, err := LoadDrainTemplates(db, storage.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("LoadDrainTemplates on empty table: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestDrainPersistence_EmptyDB(t *testing.T) {
 	}
 
 	// Calling with nil DB is also safe.
-	tpls, err = LoadDrainTemplates(nil)
+	tpls, err = LoadDrainTemplates(nil, storage.DefaultTenantID)
 	if err != nil {
 		t.Fatalf("LoadDrainTemplates(nil): %v", err)
 	}
@@ -157,7 +158,7 @@ func TestDrainPersistence_EmptyDB(t *testing.T) {
 	}
 
 	// Saving an empty slice is a no-op (no error, no rows).
-	if err := SaveDrainTemplates(db, nil); err != nil {
+	if err := SaveDrainTemplates(db, storage.DefaultTenantID, nil); err != nil {
 		t.Fatalf("SaveDrainTemplates(nil): %v", err)
 	}
 	var cnt int64
