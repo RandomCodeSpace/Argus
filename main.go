@@ -331,18 +331,18 @@ func main() {
 
 	// Hydrate vector index from recent ERROR/WARN logs on startup (non-blocking).
 	// Uses appCtx so SIGTERM during boot cancels the query before repo.Close().
+	// Hydration is cross-tenant by design: each row lands tagged with its own
+	// TenantID via vectorIdx.Add so isolation is preserved at query time. The
+	// previous tenant-scoped GetLogsV2 call silently hydrated only the default
+	// tenant's rows — non-default tenants lost their warm index on every
+	// restart.
 	bootWG.Add(1)
 	go func() {
 		defer bootWG.Done()
-		recentLogs, _, err := repo.GetLogsV2(appCtx, storage.LogFilter{
-			Severity:  "ERROR",
-			StartTime: time.Now().Add(-24 * time.Hour),
-			EndTime:   time.Now(),
-			Limit:     5000,
-		})
+		recentLogs, err := repo.ListRecentHighSeverityLogsAllTenants(appCtx, "ERROR", time.Now().Add(-24*time.Hour), time.Now(), 5000)
 		if err == nil {
 			for _, l := range recentLogs {
-				vectorIdx.Add(l.ID, l.ServiceName, l.Severity, l.Body)
+				vectorIdx.Add(l.ID, l.TenantID, l.ServiceName, l.Severity, l.Body)
 			}
 			slog.Info("🔍 Vector index hydrated from recent ERROR logs", "count", len(recentLogs))
 		}
@@ -412,7 +412,7 @@ func main() {
 			Timestamp:      l.Timestamp,
 		})
 		aiService.EnqueueLog(l)
-		vectorIdx.Add(l.ID, l.ServiceName, l.Severity, l.Body)
+		vectorIdx.Add(l.ID, l.TenantID, l.ServiceName, l.Severity, l.Body)
 		eventHub.NotifyRefresh()
 		if time.Since(start) > 100*time.Millisecond {
 			slog.Warn("Slow broadcast/enqueue", "duration", time.Since(start))
