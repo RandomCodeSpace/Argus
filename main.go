@@ -377,9 +377,9 @@ func main() {
 	apiServer.SetVectorIndex(vectorIdx)
 
 	// 6b. Initialize MCP Server (HTTP Streamable, JSON-RPC 2.0 + SSE)
-	mcpServer := mcp.New(repo, metrics, svcGraph, vectorIdx)
+	mcpServer := mcp.New(cfg.DefaultTenant, repo, metrics, svcGraph, vectorIdx)
 	mcpServer.SetGraphRAG(graphRAG)
-	slog.Info("🤖 MCP server initialized", "path", cfg.MCPPath, "enabled", cfg.MCPEnabled)
+	slog.Info("🤖 MCP server initialized", "path", cfg.MCPPath, "enabled", cfg.MCPEnabled, "default_tenant", cfg.DefaultTenant)
 
 	// 7. Initialize OTLP Ingestion (gRPC)
 	traceServer := ingest.NewTraceServer(repo, metrics, cfg)
