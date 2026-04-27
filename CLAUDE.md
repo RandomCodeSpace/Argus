@@ -39,7 +39,7 @@ HTTP :8080 ◄── REST API ◄───────────┘
 | Path | Endpoint | Content Types | Notes |
 |------|----------|---------------|-------|
 | gRPC | `:4317` | protobuf | Traces, Logs, Metrics via OTLP gRPC |
-| HTTP | `/v1/traces`, `/v1/logs`, `/v1/metrics` | `application/x-protobuf`, `application/json` | OTLP HTTP spec compliant, gzip support, 4MB limit |
+| HTTP | `/v1/traces`, `/v1/logs`, `/v1/metrics` | `application/x-protobuf`, `application/json` | OTLP HTTP spec compliant, gzip support, 4MB limit. Returns `429 Too Many Requests` + `Retry-After: 1` when the async pipeline queue is full (parity with gRPC `RESOURCE_EXHAUSTED`). |
 
 Both paths delegate to the same `Export()` methods — zero business logic duplication. By default `Export()` parses the OTLP request and hands a `Batch` to the async ingest `Pipeline` (`internal/ingest/pipeline.go`); a worker pool persists Trace→Span→Log in order. With `INGEST_ASYNC_ENABLED=false` the pipeline is bypassed and `Export()` writes inline (legacy path).
 

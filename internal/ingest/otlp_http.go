@@ -8,15 +8,25 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	spb "google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
+
+// defaultRetryAfterSeconds is the Retry-After value advertised when the
+// pipeline queue is full and the HTTP handler returns 429. Mirrors the
+// gRPC RESOURCE_EXHAUSTED back-off semantics from Phase 1 — short enough
+// that healthy clients recover quickly, long enough to give a stuck
+// downstream a chance to drain.
+const defaultRetryAfterSeconds = 1
 
 // withTenantFromHTTP attaches a tenant ID from the X-Tenant-ID header (if any)
 // to the request context before delegating to the gRPC Export methods.
@@ -47,6 +57,11 @@ type HTTPHandler struct {
 	metrics              *MetricsServer
 	maxBodyBytes         int64 // pre-decompress wire size cap
 	maxDecompressedBytes int64 // post-gzip decompressed size cap (zip-bomb guard)
+
+	// onThrottle is invoked once per signal type (traces|logs|metrics) every
+	// time the async ingest pipeline returns RESOURCE_EXHAUSTED and the HTTP
+	// handler maps it to 429. nil-safe.
+	onThrottle func(signal string)
 }
 
 // NewHTTPHandler creates an HTTP OTLP handler wrapping the existing gRPC servers.
@@ -75,6 +90,40 @@ func (h *HTTPHandler) SetMaxDecompressedBytes(n int64) {
 	}
 }
 
+// SetThrottleCallback wires a per-signal counter that increments every time a
+// 429 is returned because the async ingest pipeline is at capacity. Used by
+// main.go to feed `otelcontext_http_otlp_throttled_total{signal=…}`.
+func (h *HTTPHandler) SetThrottleCallback(fn func(signal string)) {
+	h.onThrottle = fn
+}
+
+// isQueueFull reports whether the error returned by an Export() method is
+// the gRPC RESOURCE_EXHAUSTED status used by the async pipeline to signal
+// "queue at capacity". Used by the HTTP handlers to map back to 429.
+func isQueueFull(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrQueueFull) {
+		return true
+	}
+	if s, ok := grpcstatus.FromError(err); ok && s.Code() == codes.ResourceExhausted {
+		return true
+	}
+	return false
+}
+
+// writeThrottled emits an OTLP-shaped 429 with a Retry-After header. The
+// Retry-After value is duplicated in the protobuf Status message so clients
+// that don't read headers (some custom OTLP shims) still see it.
+func (h *HTTPHandler) writeThrottled(w http.ResponseWriter, signal string) {
+	if h.onThrottle != nil {
+		h.onThrottle(signal)
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(defaultRetryAfterSeconds))
+	writeOTLPError(w, http.StatusTooManyRequests, fmt.Sprintf("ingest pipeline at capacity, retry after %ds", defaultRetryAfterSeconds))
+}
+
 // RegisterRoutes registers the HTTP OTLP endpoints on the given mux.
 func (h *HTTPHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/traces", h.handleTraces)
@@ -101,6 +150,10 @@ func (h *HTTPHandler) handleTraces(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.traces.Export(withTenantFromHTTP(r), req)
 	if err != nil {
+		if isQueueFull(err) {
+			h.writeThrottled(w, "traces")
+			return
+		}
 		slog.Error("HTTP OTLP traces export failed", "error", err)
 		writeOTLPError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -128,6 +181,10 @@ func (h *HTTPHandler) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.logs.Export(withTenantFromHTTP(r), req)
 	if err != nil {
+		if isQueueFull(err) {
+			h.writeThrottled(w, "logs")
+			return
+		}
 		slog.Error("HTTP OTLP logs export failed", "error", err)
 		writeOTLPError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -155,6 +212,10 @@ func (h *HTTPHandler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.metrics.Export(withTenantFromHTTP(r), req)
 	if err != nil {
+		if isQueueFull(err) {
+			h.writeThrottled(w, "metrics")
+			return
+		}
 		slog.Error("HTTP OTLP metrics export failed", "error", err)
 		writeOTLPError(w, http.StatusInternalServerError, err.Error())
 		return
