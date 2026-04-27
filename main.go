@@ -607,6 +607,11 @@ func main() {
 
 	// 7b. Register HTTP OTLP endpoints (before catch-all UI handler)
 	otlpHTTP := ingest.NewHTTPHandler(traceServer, logsServer, metricsServer)
+	if metrics != nil && metrics.HTTPOTLPThrottledTotal != nil {
+		otlpHTTP.SetThrottleCallback(func(signal string) {
+			metrics.HTTPOTLPThrottledTotal.WithLabelValues(signal).Inc()
+		})
+	}
 
 	// 8. Start HTTP Server
 	mux := http.NewServeMux()

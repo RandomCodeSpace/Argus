@@ -101,6 +101,12 @@ type Metrics struct {
 	// reason="queue_full"        — batch rejected at 100% capacity (client got 429/RESOURCE_EXHAUSTED).
 	IngestPipelineDroppedTotal *prometheus.CounterVec
 
+	// HTTPOTLPThrottledTotal — count of HTTP 429s issued by the OTLP HTTP
+	// receiver when the async ingest pipeline is full. Mirrors the gRPC
+	// RESOURCE_EXHAUSTED path so operators see a single throttling signal
+	// across both transports. Label `signal` is one of traces|logs|metrics.
+	HTTPOTLPThrottledTotal *prometheus.CounterVec
+
 	// --- DB pool (sampled every 5s from sql.DB.Stats) ---
 	DBPoolOpenConnections prometheus.Gauge
 	DBPoolInUse           prometheus.Gauge
@@ -309,6 +315,10 @@ func New() *Metrics {
 		IngestPipelineQueueDepth: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "otelcontext_ingest_pipeline_queue_depth",
 			Help: "Current depth of the async ingest pipeline queue, by signal type.",
+		}, []string{"signal"}),
+		HTTPOTLPThrottledTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "otelcontext_http_otlp_throttled_total",
+			Help: "OTLP HTTP requests rejected with 429 because the async ingest pipeline is at capacity, by signal type.",
 		}, []string{"signal"}),
 		IngestPipelineDroppedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "otelcontext_ingest_pipeline_dropped_total",
