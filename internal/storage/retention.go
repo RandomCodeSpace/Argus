@@ -169,9 +169,18 @@ func (r *RetentionScheduler) runPurge(ctx context.Context) {
 			results <- result{kind, n, err}
 		}()
 	}
-	runGuarded("logs", func() (int64, error) {
-		return r.repo.PurgeLogsBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
-	})
+	// When DB_POSTGRES_PARTITIONING=daily is active, retention for `logs` is
+	// handled by PartitionScheduler via DROP PARTITION (orders of magnitude
+	// faster than DELETE). Skip the logs DELETE here so we don't pay for two
+	// retention paths against the same table.
+	logsHandledByPartition := r.repo.LogsPartitioned()
+	logsExpected := 0
+	if !logsHandledByPartition {
+		logsExpected = 1
+		runGuarded("logs", func() (int64, error) {
+			return r.repo.PurgeLogsBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
+		})
+	}
 	runGuarded("traces", func() (int64, error) {
 		return r.repo.PurgeTracesBatched(ctx, cutoff, r.purgeBatchSize, r.purgeBatchSleep)
 	})
@@ -181,7 +190,8 @@ func (r *RetentionScheduler) runPurge(ctx context.Context) {
 
 	purgeFailed := false
 	totals := map[string]int64{}
-	for i := 0; i < 3; i++ {
+	totalRuns := 2 + logsExpected
+	for range totalRuns {
 		res := <-results
 		if res.err != nil {
 			slog.Error("retention: purge failed", "kind", res.kind, "error", res.err)

@@ -218,6 +218,7 @@ Key settings in `internal/config/config.go`:
 - `INGEST_ASYNC_ENABLED` (true), `INGEST_PIPELINE_QUEUE_SIZE` (50000), `INGEST_PIPELINE_WORKERS` (8) — async ingest pipeline (`internal/ingest/pipeline.go`). Hybrid backpressure: <90% accept all, 90–100% drop healthy batches (errors/slow always pass), 100% return gRPC `RESOURCE_EXHAUSTED`. Set `INGEST_ASYNC_ENABLED=false` to revert to synchronous DB writes inside `Export()`. Drops surface as `otelcontext_ingest_pipeline_dropped_total{signal,reason}`.
 - `GRPC_MAX_RECV_MB` (16), `GRPC_MAX_CONCURRENT_STREAMS` (1000) — OTLP gRPC server caps, validated to 1..256 and 1..1_000_000
 - `RETENTION_BATCH_SIZE` (50000), `RETENTION_BATCH_SLEEP_MS` (1) — purge pacing; raise the sleep on busy production DBs
+- `DB_POSTGRES_PARTITIONING` (`""`), `DB_PARTITION_LOOKAHEAD_DAYS` (3) — opt-in Postgres declarative range partitioning of the `logs` table by day. When `daily`, `logs` is provisioned as a partitioned parent (greenfield only — refuses to start if `logs` already exists unpartitioned), the `PartitionScheduler` maintains lookahead partitions and drops expired ones via `DROP TABLE`, and `RetentionScheduler` skips the row-level DELETE for `logs`. Watch `otelcontext_partitions_dropped_total` and `otelcontext_partitions_active`.
 - `APP_ENV` (`"development"`), `OTELCONTEXT_ALLOW_SQLITE_PROD` (false) — SQLite is refused when `APP_ENV=production` unless the allow flag is set
 
 ### Authentication

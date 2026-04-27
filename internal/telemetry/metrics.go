@@ -67,6 +67,15 @@ type Metrics struct {
 	RetentionVacuumDurationSeconds *prometheus.HistogramVec
 	RetentionRowsBehindGauge       *prometheus.GaugeVec
 
+	// --- Postgres partitioning (DB_POSTGRES_PARTITIONING=daily) ---
+	// PartitionsDropped counts daily logs partitions dropped during the
+	// retention pass. Each drop is a near-instant DDL — alert when this
+	// counter is flat for >1.5 retention periods (indicates a stuck loop).
+	PartitionsDropped prometheus.Counter
+	// PartitionsActive gauges the live partitions attached to logs.
+	// Healthy steady-state ~ HOT_RETENTION_DAYS + DB_PARTITION_LOOKAHEAD_DAYS + 1.
+	PartitionsActive prometheus.Gauge
+
 	// --- Runtime ---
 	GoGoroutines     prometheus.Gauge
 	GoHeapAllocBytes prometheus.Gauge
@@ -241,6 +250,16 @@ func New() *Metrics {
 			Name: "otelcontext_retention_rows_behind",
 			Help: "Rows older than retention cutoff that have not yet been purged. Climbing means purge cannot keep pace with ingest.",
 		}, []string{"table", "driver"}),
+
+		// Postgres partitioning
+		PartitionsDropped: promauto.NewCounter(prometheus.CounterOpts{
+			Name: "otelcontext_partitions_dropped_total",
+			Help: "Total daily logs partitions dropped by the partition scheduler. Increments by `n` when n partitions are dropped on a single tick.",
+		}),
+		PartitionsActive: promauto.NewGauge(prometheus.GaugeOpts{
+			Name: "otelcontext_partitions_active",
+			Help: "Live partitions attached to the logs parent. Steady-state ≈ HOT_RETENTION_DAYS + DB_PARTITION_LOOKAHEAD_DAYS + 1.",
+		}),
 
 		// Runtime
 		GoGoroutines: promauto.NewGauge(prometheus.GaugeOpts{

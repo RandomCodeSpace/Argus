@@ -30,6 +30,19 @@ type Config struct {
 	DBMaxIdleConns    int
 	DBConnMaxLifetime string // e.g. "1h", "30m"
 
+	// Postgres-only opt-in: declarative range partitioning of the logs table by
+	// day. When set to "daily", AutoMigrate provisions logs as a partitioned
+	// table and the PartitionScheduler creates lookahead partitions and drops
+	// expired ones (DROP PARTITION beats DELETE for retention by orders of
+	// magnitude). Greenfield only — startup refuses if `logs` already exists
+	// as a non-partitioned table. Empty / "none" = legacy unpartitioned schema.
+	DBPostgresPartitioning string
+
+	// Number of future daily partitions to maintain ahead of "today" when
+	// DBPostgresPartitioning=daily. Defaults to 3. Tune up if your retention
+	// policy is short and ingest spikes around a daily boundary.
+	DBPartitionLookaheadDays int
+
 	// Retention
 	HotRetentionDays int
 
@@ -186,6 +199,10 @@ func Load(customPath string) (*Config, error) {
 		DBMaxIdleConns:    getEnvInt("DB_MAX_IDLE_CONNS", 10),
 		DBConnMaxLifetime: getEnv("DB_CONN_MAX_LIFETIME", "1h"),
 
+		// Postgres partitioning (opt-in). Default empty = legacy unpartitioned.
+		DBPostgresPartitioning:   strings.ToLower(strings.TrimSpace(getEnv("DB_POSTGRES_PARTITIONING", ""))),
+		DBPartitionLookaheadDays: getEnvInt("DB_PARTITION_LOOKAHEAD_DAYS", 3),
+
 		// Retention
 		HotRetentionDays:      getEnvInt("HOT_RETENTION_DAYS", 7),
 		RetentionBatchSize:    getEnvInt("RETENTION_BATCH_SIZE", 50000),
@@ -322,6 +339,27 @@ func (c *Config) Validate() error {
 	}
 	if !validDrivers[strings.ToLower(c.DBDriver)] {
 		return fmt.Errorf("invalid DB_DRIVER %q: must be one of sqlite, postgres, mysql, mssql", c.DBDriver)
+	}
+
+	// Partitioning is Postgres-only. Reject mismatched configs at startup so
+	// the operator finds out immediately rather than silently running in
+	// unpartitioned mode.
+	switch c.DBPostgresPartitioning {
+	case "", "none", "daily":
+		// ok
+	default:
+		return fmt.Errorf("invalid DB_POSTGRES_PARTITIONING %q: must be one of \"\", \"none\", \"daily\"", c.DBPostgresPartitioning)
+	}
+	if c.DBPostgresPartitioning == "daily" {
+		drv := strings.ToLower(c.DBDriver)
+		if drv != "postgres" && drv != "postgresql" {
+			return fmt.Errorf("DB_POSTGRES_PARTITIONING=daily requires DB_DRIVER=postgres, got %q", c.DBDriver)
+		}
+	}
+	// 0 == "use default at the storage layer" so direct struct construction
+	// (tests, embedded callers) doesn't have to set it.
+	if c.DBPartitionLookaheadDays < 0 || c.DBPartitionLookaheadDays > 365 {
+		return fmt.Errorf("DB_PARTITION_LOOKAHEAD_DAYS must be between 0 and 365, got %d", c.DBPartitionLookaheadDays)
 	}
 
 	// Numeric ranges.
