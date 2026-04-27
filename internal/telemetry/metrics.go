@@ -78,6 +78,15 @@ type Metrics struct {
 	// --- GraphRAG overflow ---
 	GraphRAGEventsDroppedTotal *prometheus.CounterVec
 
+	// --- Async ingest pipeline (Phase 1 robustness work) ---
+	// IngestPipelineQueueDepth — current queue depth, sampled on every Submit.
+	// Labeled by signal so spikes can be attributed to traces vs logs.
+	IngestPipelineQueueDepth *prometheus.GaugeVec
+	// IngestPipelineDroppedTotal — batches that did NOT reach the DB.
+	// reason="soft_backpressure" — healthy batch dropped at >=90% fullness.
+	// reason="queue_full"        — batch rejected at 100% capacity (client got 429/RESOURCE_EXHAUSTED).
+	IngestPipelineDroppedTotal *prometheus.CounterVec
+
 	// --- DB pool (sampled every 5s from sql.DB.Stats) ---
 	DBPoolOpenConnections prometheus.Gauge
 	DBPoolInUse           prometheus.Gauge
@@ -268,6 +277,15 @@ func New() *Metrics {
 			Name: "otelcontext_graphrag_events_dropped_total",
 			Help: "Events dropped because the GraphRAG event channel was full.",
 		}, []string{"signal"}),
+
+		IngestPipelineQueueDepth: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "otelcontext_ingest_pipeline_queue_depth",
+			Help: "Current depth of the async ingest pipeline queue, by signal type.",
+		}, []string{"signal"}),
+		IngestPipelineDroppedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "otelcontext_ingest_pipeline_dropped_total",
+			Help: "Batches dropped by the async ingest pipeline. reason=soft_backpressure (>=90% queue, healthy) or queue_full (100% queue, rejected to client).",
+		}, []string{"signal", "reason"}),
 
 		// DB pool (Task 7 — visibility for DB_MAX_OPEN_CONNS sizing).
 		DBPoolOpenConnections: promauto.NewGauge(prometheus.GaugeOpts{
