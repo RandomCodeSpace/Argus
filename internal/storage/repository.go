@@ -5,12 +5,29 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/telemetry"
 	"gorm.io/gorm"
 )
+
+// partitionLookaheadFromEnv reads DB_PARTITION_LOOKAHEAD_DAYS, defaulting to
+// 3 when unset, malformed, or out of the validation range. Validation also
+// happens at the config layer; this fallback keeps the storage package
+// usable when wired without a *config.Config (tests, embedded callers).
+func partitionLookaheadFromEnv() int {
+	v := strings.TrimSpace(os.Getenv("DB_PARTITION_LOOKAHEAD_DAYS"))
+	if v == "" {
+		return 3
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 365 {
+		return 3
+	}
+	return n
+}
 
 // likeOpFor returns the case-insensitive LIKE operator for the given driver.
 // Postgres LIKE is case-sensitive; SQLite/MySQL LIKE is case-insensitive by default.
@@ -47,7 +64,22 @@ type Repository struct {
 	db      *gorm.DB
 	driver  string
 	metrics *telemetry.Metrics
+
+	// logsPartitioned is set to true when DB_POSTGRES_PARTITIONING=daily is
+	// active and the `logs` parent has been provisioned as a partitioned
+	// table. RetentionScheduler reads this to skip the logs DELETE — the
+	// PartitionScheduler does retention via DROP PARTITION instead.
+	logsPartitioned bool
 }
+
+// LogsPartitioned reports whether the `logs` table is provisioned as a
+// declarative partitioned parent. Used by RetentionScheduler to bypass the
+// row-level DELETE path when partition-level DROP is in charge of retention.
+func (r *Repository) LogsPartitioned() bool { return r.logsPartitioned }
+
+// MarkLogsPartitioned flips the partitioned flag. Called by the partitioning
+// setup path (factory.go) once the partitioned schema is in place.
+func (r *Repository) MarkLogsPartitioned() { r.logsPartitioned = true }
 
 // NewRepository initializes the database connection using environment variables and migrates the schema.
 func NewRepository(metrics *telemetry.Metrics) (*Repository, error) {
@@ -67,7 +99,11 @@ func NewRepository(metrics *telemetry.Metrics) (*Repository, error) {
 	// Auto-migration is enabled by default. Disable via DB_AUTOMIGRATE=false when
 	// using versioned migrations in production (Postgres table locks, no rollback).
 	if autoMigrateEnabled() {
-		if err := AutoMigrateModels(db, driver); err != nil {
+		opts := MigrateOptions{
+			PostgresPartitioning:   strings.ToLower(strings.TrimSpace(os.Getenv("DB_POSTGRES_PARTITIONING"))),
+			PartitionLookaheadDays: partitionLookaheadFromEnv(),
+		}
+		if err := AutoMigrateModelsWithOptions(db, driver, opts); err != nil {
 			return nil, err
 		}
 	} else {
@@ -96,7 +132,19 @@ func NewRepository(metrics *telemetry.Metrics) (*Repository, error) {
 		})
 	}
 
-	return &Repository{db: db, driver: driver, metrics: metrics}, nil
+	repo := &Repository{db: db, driver: driver, metrics: metrics}
+	// Detect partitioned-logs mode from the live schema so the
+	// RetentionScheduler can skip the row-level DELETE path. We do this from
+	// the DB rather than passing the config flag through several layers,
+	// which keeps the storage package config-agnostic and resilient to a
+	// half-applied migration.
+	if driver == "postgres" || driver == "postgresql" {
+		if rk, err := pgLogsRelkind(db); err == nil && rk == "p" {
+			repo.logsPartitioned = true
+			slog.Info("📦 Postgres: logs is partitioned — retention will use DROP PARTITION (via PartitionScheduler)")
+		}
+	}
+	return repo, nil
 }
 
 // Stats aggregation and DB management

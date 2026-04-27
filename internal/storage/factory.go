@@ -184,7 +184,33 @@ func getEnvPoolDuration(key string, fallback time.Duration) time.Duration {
 }
 
 // AutoMigrateModels runs GORM auto-migration for all OtelContext models.
+//
+// When DB_POSTGRES_PARTITIONING=daily, the `logs` table is provisioned as a
+// declarative range-partitioned parent BEFORE GORM AutoMigrate runs, so
+// AutoMigrate sees an existing table and skips it (GORM's IF NOT EXISTS
+// behaviour). This is greenfield-only — see setupPostgresPartitionedLogs for
+// the safety check.
 func AutoMigrateModels(db *gorm.DB, driver string) error {
+	return AutoMigrateModelsWithOptions(db, driver, MigrateOptions{})
+}
+
+// MigrateOptions tunes AutoMigrateModelsWithOptions. Empty zero value
+// preserves the legacy AutoMigrateModels behaviour.
+type MigrateOptions struct {
+	// PostgresPartitioning, when "daily", provisions `logs` as a partitioned
+	// table. Any other value (including the empty string) keeps the legacy
+	// unpartitioned schema.
+	PostgresPartitioning string
+	// PartitionLookaheadDays is the number of future daily partitions to
+	// pre-create at boot. Defaults to 3 when zero.
+	PartitionLookaheadDays int
+}
+
+// AutoMigrateModelsWithOptions is the option-driven variant of
+// AutoMigrateModels. Existing callers should continue to use AutoMigrateModels
+// — the options entry point is for new wiring (currently main.go) that needs
+// to plumb the partitioning flag.
+func AutoMigrateModelsWithOptions(db *gorm.DB, driver string, opts MigrateOptions) error {
 	driver = strings.ToLower(driver)
 
 	// Disable FK checks during migration for MySQL.
@@ -197,7 +223,26 @@ func AutoMigrateModels(db *gorm.DB, driver string) error {
 		log.Println("🔓 Disabled foreign key checks for migration")
 	}
 
-	if err := db.AutoMigrate(&Trace{}, &Span{}, &Log{}, &MetricBucket{}); err != nil {
+	// Postgres partitioning: provision the partitioned `logs` parent + initial
+	// daily partitions BEFORE GORM AutoMigrate runs, and skip Log from
+	// AutoMigrate's slice. AutoMigrate would otherwise try to ALTER the
+	// timestamp column (because the model tag doesn't carry an explicit
+	// `not null` and the partitioned PK forces NOT NULL on the column),
+	// which Postgres rejects because the column is part of the partition key.
+	logsPartitioned := false
+	if (driver == "postgres" || driver == "postgresql") && opts.PostgresPartitioning == PartitioningModeDaily {
+		if err := setupPostgresPartitionedLogs(db, opts.PartitionLookaheadDays); err != nil {
+			return fmt.Errorf("setup partitioned logs: %w", err)
+		}
+		log.Printf("📦 Postgres: declarative partitioning enabled (daily, lookahead=%d days)", opts.PartitionLookaheadDays)
+		logsPartitioned = true
+	}
+
+	migrateModels := []any{&Trace{}, &Span{}, &MetricBucket{}}
+	if !logsPartitioned {
+		migrateModels = append(migrateModels, &Log{})
+	}
+	if err := db.AutoMigrate(migrateModels...); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 

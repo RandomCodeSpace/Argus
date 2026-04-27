@@ -198,6 +198,33 @@ func main() {
 	retention.Start(ctxRetention)
 	slog.Info("🧹 Retention scheduler started", "retention_days", cfg.HotRetentionDays)
 
+	// 2b. Partition scheduler: only when DB_POSTGRES_PARTITIONING=daily.
+	// Maintains lookahead daily partitions and drops expired ones — DROP
+	// PARTITION is orders of magnitude faster than DELETE for retention.
+	var partitionScheduler *storage.PartitionScheduler
+	var cancelPartitions context.CancelFunc = func() {}
+	if cfg.DBPostgresPartitioning == storage.PartitioningModeDaily {
+		ctxPart, cancelPart := context.WithCancel(context.Background())
+		partitionScheduler = storage.NewPartitionScheduler(repo, cfg.HotRetentionDays, cfg.DBPartitionLookaheadDays)
+		if metrics != nil {
+			partitionScheduler.SetMetrics(
+				func(n int) {
+					if metrics.PartitionsDropped != nil {
+						metrics.PartitionsDropped.Add(float64(n))
+					}
+				},
+				func(n int) {
+					if metrics.PartitionsActive != nil {
+						metrics.PartitionsActive.Set(float64(n))
+					}
+				},
+			)
+		}
+		partitionScheduler.Start(ctxPart)
+		cancelPartitions = cancelPart
+		slog.Info("📦 Partition scheduler started", "lookahead_days", cfg.DBPartitionLookaheadDays, "retention_days", cfg.HotRetentionDays)
+	}
+
 	// 3. Initialize DLQ (Dead Letter Queue)
 	replayInterval, err := time.ParseDuration(cfg.DLQReplayInterval)
 	if err != nil {
@@ -788,9 +815,13 @@ func main() {
 	// 4. Stop DLQ (may still be replaying)
 	dlq.Stop()
 
-	// 4a. Stop retention scheduler before closing DB (it issues queries).
+	// 4a. Stop retention + partition schedulers before closing DB (both issue queries).
 	cancelRetention()
 	retention.Stop()
+	cancelPartitions()
+	if partitionScheduler != nil {
+		partitionScheduler.Stop()
+	}
 
 	// 4b. Shutdown the OTel tracer provider (flushes pending spans).
 	if shutdownTracer != nil {

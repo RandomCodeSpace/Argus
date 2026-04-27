@@ -115,6 +115,27 @@ SQLite is rejected at startup when `APP_ENV=production` unless you explicitly op
 
 **Multi-tenancy.** Every row carries a `tenant_id` column. The write path reads `X-Tenant-ID` (HTTP) or `x-tenant-id` (gRPC metadata) and populates the column. The read path attaches the tenant from the request context to every repository query (`Where("tenant_id = ?", ...)`).
 
+### Postgres declarative partitioning (opt-in)
+
+| Setting | Default | When to enable |
+|---|---|---|
+| `DB_POSTGRES_PARTITIONING` | `""` (off) | High-volume Postgres deployments where row-level retention DELETE on `logs` becomes the bottleneck |
+| `DB_PARTITION_LOOKAHEAD_DAYS` | `3` | Future daily partitions to keep staged. Raise if your DB is far from the app or your retention is short |
+
+When `DB_POSTGRES_PARTITIONING=daily`:
+
+- `logs` is provisioned as a `RANGE PARTITION BY (timestamp)` parent with the composite PK `(id, timestamp)`. AutoMigrate sees an existing table and skips the model.
+- Initial partitions cover yesterday + today + `lookahead` future days. Yesterday absorbs late-arriving events at the day-boundary rollover.
+- The PartitionScheduler runs hourly, idempotently ensures upcoming partitions exist, and drops any partition whose entire range predates the retention cutoff. Drop is `DROP TABLE IF EXISTS <child>` — orders of magnitude faster than the row-by-row DELETE.
+- RetentionScheduler skips its `logs` DELETE branch when partitioning is active. `traces` and `metric_buckets` continue to use the existing batched DELETE path.
+- `pg_trgm` GIN indexes on `logs.body` and `logs.service_name` are declared on the parent and propagate automatically to current and future partitions.
+
+**Greenfield only.** Startup refuses to enable partitioning if `logs` already exists as a non-partitioned table — migrating an unpartitioned `logs` to a partitioned one requires copying rows into a swapped table and is out of scope for the current phase. Drop the table or migrate manually before flipping the flag.
+
+Telemetry:
+- `otelcontext_partitions_dropped_total` — increments by `n` when the scheduler drops `n` partitions on a tick
+- `otelcontext_partitions_active` — current partition count attached to the parent. Steady-state ≈ `HOT_RETENTION_DAYS + DB_PARTITION_LOOKAHEAD_DAYS + 1`. Alert when this gauge climbs unbounded (drop loop stuck) or falls toward zero (over-aggressive drop)
+
 ### Log search index
 
 | Driver | Index | Ranking |
