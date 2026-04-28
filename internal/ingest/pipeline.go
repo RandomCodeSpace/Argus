@@ -168,26 +168,27 @@ func NewPipeline(writer pipelineWriter, metrics *telemetry.Metrics, cfg Pipeline
 	if cfg.Workers <= 0 {
 		cfg.Workers = d.Workers
 	}
-	// Sanitize operator-supplied capacity/workers into local variables BEFORE
-	// the make()/Workers loop. CodeQL's taint-tracking treats env-var-derived
-	// values as untrusted source for go/uncontrolled-allocation-size; an
-	// in-place reassignment of the field doesn't satisfy the sanitizer
-	// pattern, but a local clamp via min() does. Both ceilings are well above
+	// Sanitize operator-supplied capacity/workers BEFORE the make()/Workers
+	// loop. CodeQL's taint-tracking treats env-var-derived values as untrusted
+	// for go/uncontrolled-allocation-size; only an explicit comparison guard
+	// is recognized as a BarrierGuard sanitizer. Both ceilings are well above
 	// any reasonable deployment (50k default queue, 8 default workers) but
 	// keep the allocation bounded against a misconfigured env var.
-	capacity := min(cfg.Capacity, maxPipelineCapacity)
-	workers := min(cfg.Workers, maxPipelineWorkers)
-	if capacity != cfg.Capacity {
+	capacity := cfg.Capacity
+	if capacity > maxPipelineCapacity {
 		slog.Warn("ingest pipeline: capacity clamped to defensive ceiling",
-			"requested", cfg.Capacity,
+			"requested", capacity,
 			"max", maxPipelineCapacity,
 		)
+		capacity = maxPipelineCapacity
 	}
-	if workers != cfg.Workers {
+	workers := cfg.Workers
+	if workers > maxPipelineWorkers {
 		slog.Warn("ingest pipeline: workers clamped to defensive ceiling",
-			"requested", cfg.Workers,
+			"requested", workers,
 			"max", maxPipelineWorkers,
 		)
+		workers = maxPipelineWorkers
 	}
 	cfg.Capacity = capacity
 	cfg.Workers = workers
