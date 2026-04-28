@@ -60,6 +60,29 @@ func (f *fakeWriter) BatchCreateLogs(l []storage.Log) error {
 	return f.logErr
 }
 
+// BatchCreateAll mirrors Repository.BatchCreateAll's all-or-nothing semantics:
+// each inner method is called in Trace→Span→Log order; the first error
+// short-circuits and is returned. Existing tests that observe per-method call
+// counts and ordering keep working without modification.
+func (f *fakeWriter) BatchCreateAll(t []storage.Trace, s []storage.Span, l []storage.Log) error {
+	if len(t) > 0 {
+		if err := f.BatchCreateTraces(t); err != nil {
+			return err
+		}
+	}
+	if len(s) > 0 {
+		if err := f.BatchCreateSpans(s); err != nil {
+			return err
+		}
+	}
+	if len(l) > 0 {
+		if err := f.BatchCreateLogs(l); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (f *fakeWriter) snapshotOrder() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -281,10 +304,11 @@ func TestPipeline_FailedSpansSkipsLogs(t *testing.T) {
 	}
 }
 
-func TestPipeline_FailedTracesContinuesToSpans(t *testing.T) {
-	// Trace failures are tolerated — spans may still land if the trace
-	// row exists from a prior batch. Must NOT short-circuit subsequent
-	// span/log persistence.
+func TestPipeline_FailedTracesAbortsBatch(t *testing.T) {
+	// Trace failures roll the entire batch back — atomic batches are the
+	// fix for orphan FK rows when a worker crashes between BatchCreate*
+	// calls. Spans and logs must NOT be persisted when the trace insert
+	// fails. Counterpart of TestPipeline_FailedSpansSkipsLogs.
 	w := &fakeWriter{traceErr: errors.New("transient")}
 	p := NewPipeline(w, nil, PipelineConfig{Capacity: 2, Workers: 1})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -295,11 +319,14 @@ func TestPipeline_FailedTracesContinuesToSpans(t *testing.T) {
 	if err := p.Submit(healthyBatch()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool {
-		ord := w.snapshotOrder()
-		return len(ord) == 3 && ord[1] == "spans" && ord[2] == "logs"
-	}) {
-		t.Fatalf("trace failure should not stop spans/logs — order=%v", w.snapshotOrder())
+	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().ProcessFailures > 0 }) {
+		t.Fatalf("expected ProcessFailures > 0, got %d", p.Stats().ProcessFailures)
+	}
+	calls := w.snapshotOrder()
+	for _, c := range calls {
+		if c == "spans" || c == "logs" {
+			t.Fatalf("spans/logs ran after trace failure — order=%v", calls)
+		}
 	}
 }
 

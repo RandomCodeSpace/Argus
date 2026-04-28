@@ -63,10 +63,53 @@ func (r *Repository) BatchCreateTraces(traces []Trace) error {
 	if len(traces) == 0 {
 		return nil
 	}
-	if strings.ToLower(r.driver) == "mysql" {
-		return r.db.Clauses(clause.Insert{Modifier: "IGNORE"}).Create(&traces).Error
+	return createTracesIdempotent(r.db, r.driver, traces)
+}
+
+// createTracesIdempotent runs the conflict-tolerant trace insert against an
+// arbitrary *gorm.DB so the same logic is reused inside a transaction by
+// BatchCreateAll. MySQL takes INSERT IGNORE; SQLite/Postgres take
+// ON CONFLICT DO NOTHING via the gorm clause helper.
+func createTracesIdempotent(db *gorm.DB, driver string, traces []Trace) error {
+	if strings.ToLower(driver) == "mysql" {
+		return db.Clauses(clause.Insert{Modifier: "IGNORE"}).Create(&traces).Error
 	}
-	return r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&traces).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(&traces).Error
+}
+
+// BatchCreateAll persists traces, spans, and logs in a single DB transaction.
+// The async ingest pipeline uses this path so a failure (or panic) mid-batch
+// rolls back any partial commit, preventing orphan FK rows from a worker that
+// crashed between BatchCreateTraces and BatchCreateSpans.
+//
+// Trace inserts inherit BatchCreateTraces' idempotency: a trace_id clash
+// within the same tenant is silently skipped. Spans and logs have no unique
+// constraint, so a replay can still produce duplicate rows — that is a
+// separate idempotency concern (requires schema migration to fix) and is
+// out of scope for this method, whose contract is solely atomicity of the
+// batch.
+func (r *Repository) BatchCreateAll(traces []Trace, spans []Span, logs []Log) error {
+	if len(traces) == 0 && len(spans) == 0 && len(logs) == 0 {
+		return nil
+	}
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if len(traces) > 0 {
+			if err := createTracesIdempotent(tx, r.driver, traces); err != nil {
+				return fmt.Errorf("BatchCreateAll: traces: %w", err)
+			}
+		}
+		if len(spans) > 0 {
+			if err := tx.CreateInBatches(spans, 500).Error; err != nil {
+				return fmt.Errorf("BatchCreateAll: spans: %w", err)
+			}
+		}
+		if len(logs) > 0 {
+			if err := tx.CreateInBatches(logs, 500).Error; err != nil {
+				return fmt.Errorf("BatchCreateAll: logs: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 // CreateTrace inserts a new trace, skipping if it already exists.

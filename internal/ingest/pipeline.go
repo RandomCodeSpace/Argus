@@ -90,10 +90,19 @@ func DefaultPipelineConfig() PipelineConfig {
 // pipelineWriter is the slice of *storage.Repository the Pipeline depends
 // on. Defining it as an interface keeps the package layering clean and
 // lets tests inject fakes without spinning up SQLite.
+//
+// The async pipeline drives only BatchCreateAll. The single-signal
+// methods are kept on the interface for forward-compatibility with
+// callers that may construct a writer directly (e.g. backfill tools);
+// they aren't on the hot ingest path anymore.
 type pipelineWriter interface {
 	BatchCreateTraces(traces []storage.Trace) error
 	BatchCreateSpans(spans []storage.Span) error
 	BatchCreateLogs(logs []storage.Log) error
+	// BatchCreateAll persists all three signal slices as a single atomic
+	// transaction. A failure (or panic) anywhere in the chain rolls back
+	// the entire batch, preventing orphan FK rows.
+	BatchCreateAll(traces []storage.Trace, spans []storage.Span, logs []storage.Log) error
 }
 
 // Pipeline decouples OTLP Export() from synchronous DB writes. It holds a
@@ -277,10 +286,18 @@ func (p *Pipeline) worker(ctx context.Context) {
 	}
 }
 
-// process persists a single batch in Trace→Span→Log order, mirroring the
-// ordering invariant of the synchronous Export() path. Failures are
-// logged and surfaced via processFailures; the batch is then dropped
-// (the DLQ tier is the redundancy story for write failures).
+// process persists a single batch in a single DB transaction. Trace→Span→Log
+// ordering inside the transaction mirrors the FK invariant of the synchronous
+// Export() path; atomicity prevents the orphan-row class of bugs where a
+// panic between two BatchCreate* calls left a parent row with no children
+// (or vice versa). Any failure rolls the entire batch back; the worker logs,
+// increments processFailures, and drops the batch (DLQ is the redundancy
+// story for sustained failures).
+//
+// Behavior change vs. the pre-tx implementation: trace insert errors are no
+// longer "tolerated" with downstream spans/logs continuing — the whole batch
+// is now atomic. This is intentional. Traces are idempotent (ON CONFLICT
+// DO NOTHING), so a DLQ retry of the same envelope re-attempts cleanly.
 func (p *Pipeline) process(b *Batch) {
 	if b == nil {
 		return
@@ -299,41 +316,27 @@ func (p *Pipeline) process(b *Batch) {
 	}()
 	p.processedTotal.Add(1)
 
-	if len(b.Traces) > 0 {
-		if err := p.writer.BatchCreateTraces(b.Traces); err != nil {
-			slog.Error("ingest pipeline: BatchCreateTraces failed", "error", err)
-			p.processFailures.Add(1)
-			// Continue — spans may still land if their trace exists from
-			// a prior batch. Mirrors the synchronous path's tolerance.
+	if len(b.Traces) == 0 && len(b.Spans) == 0 && len(b.Logs) == 0 {
+		return
+	}
+
+	if err := p.writer.BatchCreateAll(b.Traces, b.Spans, b.Logs); err != nil {
+		slog.Error("ingest pipeline: BatchCreateAll failed", "error", err)
+		p.processFailures.Add(1)
+		return
+	}
+
+	// Callbacks fire only after the transaction commits successfully — a
+	// rolled-back batch must not feed downstream consumers (GraphRAG etc.)
+	// data that no longer exists in the DB.
+	if b.SpanCallback != nil {
+		for _, s := range b.Spans {
+			b.SpanCallback(s)
 		}
 	}
-	if len(b.Spans) > 0 {
-		if err := p.writer.BatchCreateSpans(b.Spans); err != nil {
-			slog.Error("ingest pipeline: BatchCreateSpans failed", "error", err)
-			p.processFailures.Add(1)
-			// Skip log insert in this batch — TestPipeline_FailedSpansSkipsLogs
-			// enforces the invariant that orphan logs are not persisted
-			// without their spans, mirroring the synchronous path. Span
-			// failures should be rare (DB unavailable etc.); the DLQ tier
-			// is the redundancy story for sustained failures.
-			return
-		}
-		if b.SpanCallback != nil {
-			for _, s := range b.Spans {
-				b.SpanCallback(s)
-			}
-		}
-	}
-	if len(b.Logs) > 0 {
-		if err := p.writer.BatchCreateLogs(b.Logs); err != nil {
-			slog.Error("ingest pipeline: BatchCreateLogs failed", "error", err)
-			p.processFailures.Add(1)
-			return
-		}
-		if b.LogCallback != nil {
-			for _, l := range b.Logs {
-				b.LogCallback(l)
-			}
+	if b.LogCallback != nil {
+		for _, l := range b.Logs {
+			b.LogCallback(l)
 		}
 	}
 }
