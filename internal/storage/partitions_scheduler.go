@@ -66,6 +66,12 @@ func (s *PartitionScheduler) SetMetrics(onDrop, onKeep func(int)) {
 // Start kicks off the background loop. It performs an initial ensure+drop
 // pass synchronously so a fresh boot has the next-day partition staged
 // before any ingest hits it.
+//
+// One-shot lifecycle: Start is idempotent (a second call while running is a
+// no-op), and a Start-Stop-Start sequence is NOT supported — Stop closes
+// the internal `done` channel, and re-running Start would re-close it
+// during shutdown of the second iteration. Construct a fresh
+// PartitionScheduler if you need to restart.
 func (s *PartitionScheduler) Start(parent context.Context) {
 	s.mu.Lock()
 	if s.started.Load() {

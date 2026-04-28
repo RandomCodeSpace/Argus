@@ -127,8 +127,10 @@ func (r *Repository) GetLogsV2(ctx context.Context, filter LogFilter) ([]Log, in
 	})
 	if err := g.Wait(); err != nil {
 		if useFTS5 {
-			// Single retry via the LIKE fallback so a transient FTS5 issue does
-			// not turn into a 500 for users.
+			// Same rationale as searchLogsFTS5: FTS5 query error keeps the
+			// API available via LIKE, but we log loudly so the operator
+			// can rebuild the index instead of leaving the seatbelt on.
+			slog.Warn("FTS5 GetLogsV2 failed, falling back to LIKE", "tenant", tenant, "search", filter.Search, "error", err)
 			return r.getLogsV2LikeFallback(ctx, filter, tenant)
 		}
 		return nil, 0, fmt.Errorf("failed to fetch logs: %w", err)

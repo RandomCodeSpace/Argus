@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
@@ -30,9 +31,14 @@ type Aggregator struct {
 	buckets        map[string]*storage.MetricBucket
 	mu             sync.Mutex
 	stopChan       chan struct{}
-	flushChan      chan []storage.MetricBucket
-	pool           sync.Pool
-	droppedBatches int64
+	flushChan chan []storage.MetricBucket
+	pool      sync.Pool
+	// droppedBatches is incremented in flush() (under no lock other than
+	// the outer mu — but the increment path runs after the unlock) and
+	// read by DroppedBatches() concurrently from telemetry scrape paths.
+	// atomic.Int64 makes the unsynchronized read safe under the Go memory
+	// model.
+	droppedBatches atomic.Int64
 
 	// Cardinality controls.
 	//
@@ -260,7 +266,7 @@ func (a *Aggregator) BucketCount() int {
 
 // DroppedBatches returns the total number of batches dropped due to a full flush channel.
 func (a *Aggregator) DroppedBatches() int64 {
-	return a.droppedBatches
+	return a.droppedBatches.Load()
 }
 
 // flush moves the current buckets to the flush channel and resets the in-memory map.
@@ -284,11 +290,11 @@ func (a *Aggregator) flush() {
 	select {
 	case a.flushChan <- batch:
 	default:
-		a.droppedBatches++
+		dropped := a.droppedBatches.Add(1)
 		if a.onDropped != nil {
 			a.onDropped()
 		}
-		slog.Warn("⚠️ TSDB flush channel full, dropping metric batch", "count", len(batch), "total_dropped", a.droppedBatches)
+		slog.Warn("⚠️ TSDB flush channel full, dropping metric batch", "count", len(batch), "total_dropped", dropped)
 		batch = batch[:0]
 		a.pool.Put(batch) //nolint:staticcheck // SA6002: []T in sync.Pool is intentional; proper refactor would change channel semantics
 	}
