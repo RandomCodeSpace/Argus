@@ -168,12 +168,23 @@ func (s *Server) handleGetMetricNames(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(names)
 }
 
+// handleGetServices returns the list of services the caller's tenant has
+// emitted any span for. Read from the in-memory GraphRAG ServiceStore so
+// the dropdown matches /api/system/graph exactly — and so a service that
+// only appears as a downstream callee (e.g. shipping-service deep in a
+// fan-out) isn't silently dropped because some other span won the
+// trace_id-uniqueness race for the legacy `traces` table query.
+//
+// Cold-start (first ~60s after restart, before the GraphRAG refresh loop
+// rebuilds from DB) returns an empty list, which is correct: nothing has
+// been ingested yet that the dropdown could meaningfully display.
 func (s *Server) handleGetServices(w http.ResponseWriter, r *http.Request) {
-	services, err := s.repo.GetServices(r.Context())
-	if err != nil {
-		slog.Error("Failed to get services metadata", "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	var services []string
+	if s.graphRAG != nil {
+		services = s.graphRAG.ServiceNames(r.Context())
+	}
+	if services == nil {
+		services = []string{}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(services)
