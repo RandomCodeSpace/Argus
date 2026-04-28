@@ -296,6 +296,7 @@ func main() {
 		metrics.SetActiveConnections(count)
 	})
 	hub.SetDevMode(cfg.DevMode)
+	hub.SetMaxClients(cfg.WSMaxClients)
 	hub.SetWSMetrics(
 		func(msgType string) { metrics.WSMessagesSent.WithLabelValues(msgType).Inc() },
 		func() { metrics.WSSlowClientsRemoved.Inc() },
