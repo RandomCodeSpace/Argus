@@ -168,25 +168,29 @@ func NewPipeline(writer pipelineWriter, metrics *telemetry.Metrics, cfg Pipeline
 	if cfg.Workers <= 0 {
 		cfg.Workers = d.Workers
 	}
-	// Defensive sanity caps on operator-supplied values — keep them out of
-	// make()/goroutine-launch as raw env-var pass-through. CodeQL flagged
-	// the channel allocation as uncontrolled-allocation-size; clamping at
-	// the constructor satisfies the taint-tracking and prevents an OOM
-	// from a misconfigured env var.
-	if cfg.Capacity > maxPipelineCapacity {
+	// Sanitize operator-supplied capacity/workers into local variables BEFORE
+	// the make()/Workers loop. CodeQL's taint-tracking treats env-var-derived
+	// values as untrusted source for go/uncontrolled-allocation-size; an
+	// in-place reassignment of the field doesn't satisfy the sanitizer
+	// pattern, but a local clamp via min() does. Both ceilings are well above
+	// any reasonable deployment (50k default queue, 8 default workers) but
+	// keep the allocation bounded against a misconfigured env var.
+	capacity := min(cfg.Capacity, maxPipelineCapacity)
+	workers := min(cfg.Workers, maxPipelineWorkers)
+	if capacity != cfg.Capacity {
 		slog.Warn("ingest pipeline: capacity clamped to defensive ceiling",
 			"requested", cfg.Capacity,
 			"max", maxPipelineCapacity,
 		)
-		cfg.Capacity = maxPipelineCapacity
 	}
-	if cfg.Workers > maxPipelineWorkers {
+	if workers != cfg.Workers {
 		slog.Warn("ingest pipeline: workers clamped to defensive ceiling",
 			"requested", cfg.Workers,
 			"max", maxPipelineWorkers,
 		)
-		cfg.Workers = maxPipelineWorkers
 	}
+	cfg.Capacity = capacity
+	cfg.Workers = workers
 	// Zero-value config falls back to defaults — the field is internal
 	// (no env-var surface) and TestPipeline_DefaultsApplied enforces this.
 	// Priority-only mode (always-soft-drop) is not a supported configuration
@@ -198,7 +202,7 @@ func NewPipeline(writer pipelineWriter, metrics *telemetry.Metrics, cfg Pipeline
 		writer:         writer,
 		metrics:        metrics,
 		cfg:            cfg,
-		queue:          make(chan *Batch, cfg.Capacity),
+		queue:          make(chan *Batch, capacity),
 		tenantInFlight: make(map[string]int),
 		stopCh:         make(chan struct{}),
 	}
