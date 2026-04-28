@@ -355,6 +355,20 @@ func (g *GraphRAG) AllServiceEdges(ctx context.Context) []*Edge {
 	return g.storesFor(ctx).service.AllEdges()
 }
 
+// ServiceNames returns every service the caller's tenant has emitted any
+// span for, sorted ascending. Reads from the in-memory ServiceStore — no
+// DB scan. Used by /api/metadata/services so the dropdown matches the
+// system map exactly (both are sourced from the same store).
+func (g *GraphRAG) ServiceNames(ctx context.Context) []string {
+	services := g.storesFor(ctx).service.AllServices()
+	names := make([]string, 0, len(services))
+	for _, svc := range services {
+		names = append(names, svc.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // ServiceMap returns the service topology with health scores for the API.
 type ServiceMapEntry struct {
 	Service    *ServiceNode     `json:"service"`
