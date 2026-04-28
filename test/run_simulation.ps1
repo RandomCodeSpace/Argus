@@ -53,7 +53,7 @@ $Services = @(
 Push-Location $RootDir
 foreach ($svc in $Services) {
     Write-Host ("  {0,-26}" -f $svc.Name) -NoNewline -ForegroundColor DarkGray
-    go build -o "$TmpDir\$($svc.Name).exe" "./test/$($svc.Name)" 2>&1 | Out-Null
+    go build -o (Join-Path $TmpDir "$($svc.Name).exe") "./test/$($svc.Name)" 2>&1 | Out-Null
     Write-Host "built" -ForegroundColor DarkGray
 }
 Pop-Location
@@ -65,9 +65,9 @@ Write-Host "[2/3] Starting services..." -ForegroundColor Yellow
 
 $Procs = @()
 foreach ($svc in $Services) {
-    $exe    = "$TmpDir\$($svc.Name).exe"
-    $stdout = "$LogDir\$($svc.Name).stdout"
-    $stderr = "$LogDir\$($svc.Name).stderr"
+    $exe    = Join-Path $TmpDir "$($svc.Name).exe"
+    $stdout = Join-Path $LogDir "$($svc.Name).stdout"
+    $stderr = Join-Path $LogDir "$($svc.Name).stderr"
     $proc   = Start-Process -FilePath $exe -NoNewWindow -PassThru `
                             -RedirectStandardOutput $stdout `
                             -RedirectStandardError  $stderr
