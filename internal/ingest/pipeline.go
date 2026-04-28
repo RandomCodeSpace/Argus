@@ -138,6 +138,10 @@ func NewPipeline(writer pipelineWriter, metrics *telemetry.Metrics, cfg Pipeline
 	if cfg.Workers <= 0 {
 		cfg.Workers = d.Workers
 	}
+	// Zero-value config falls back to defaults — the field is internal
+	// (no env-var surface) and TestPipeline_DefaultsApplied enforces this.
+	// Priority-only mode (always-soft-drop) is not a supported configuration
+	// via PipelineConfig{SoftThreshold:0}.
 	if cfg.SoftThreshold <= 0 || cfg.SoftThreshold >= 1.0 {
 		cfg.SoftThreshold = d.SoftThreshold
 	}
@@ -307,6 +311,11 @@ func (p *Pipeline) process(b *Batch) {
 		if err := p.writer.BatchCreateSpans(b.Spans); err != nil {
 			slog.Error("ingest pipeline: BatchCreateSpans failed", "error", err)
 			p.processFailures.Add(1)
+			// Skip log insert in this batch — TestPipeline_FailedSpansSkipsLogs
+			// enforces the invariant that orphan logs are not persisted
+			// without their spans, mirroring the synchronous path. Span
+			// failures should be rare (DB unavailable etc.); the DLQ tier
+			// is the redundancy story for sustained failures.
 			return
 		}
 		if b.SpanCallback != nil {

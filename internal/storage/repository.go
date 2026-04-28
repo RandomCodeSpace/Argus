@@ -308,9 +308,14 @@ func (r *Repository) searchLogsFTS5(ctx context.Context, tenant, query string, l
 		Limit(limit).
 		Find(&logs).Error
 	if err != nil {
-		// On any FTS5 query error (malformed expression, missing table on a
-		// half-migrated DB), fall back to LIKE so we never serve a 500 just
-		// because the index path is unhappy.
+		// FTS5 setup is provisioned at migrate-time and the trigger keeps
+		// it in sync — a query error here means something genuinely went
+		// wrong (corrupt index, missing table on a half-migrated DB). We
+		// fall back to LIKE so the API stays available, but log loudly
+		// so the operator notices and can rebuild the index. CLAUDE.md
+		// "fix root cause" rule: the fallback is the seatbelt, the log is
+		// the dashboard light.
+		slog.Warn("FTS5 search failed, falling back to LIKE", "tenant", tenant, "query", query, "error", err)
 		return r.searchLogsLikeFallback(ctx, tenant, query, limit)
 	}
 	return logs, nil

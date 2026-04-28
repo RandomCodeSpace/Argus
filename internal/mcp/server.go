@@ -270,32 +270,38 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		// Concurrency gate: non-blocking acquire. Beyond the cap we surface
-		// a JSON-RPC server-overloaded error; clients are expected to retry
-		// with backoff.
-		if s.callSlots != nil {
+		// Concurrency gate: non-blocking acquire. Use an `acquired` flag
+		// rather than a `break` inside `select{default}` (which only breaks
+		// the select, not the surrounding switch — refactor footgun).
+		acquired := s.callSlots == nil
+		if !acquired {
 			select {
 			case s.callSlots <- struct{}{}:
-				// acquired
+				acquired = true
 			default:
 				s.overloaded.Add(1)
 				rpcErr = &RPCError{Code: ErrServerOverloaded, Message: "MCP server at capacity, retry shortly"}
-				break
 			}
 		}
-		// rpcErr was set inside the select-default; if so, skip the call.
-		if rpcErr != nil {
+		if !acquired {
 			break
 		}
 
 		s.inFlight.Add(1)
 		callCtx, cancel := s.deriveCallCtx(r.Context())
 		callCtx = storage.WithTenantContext(callCtx, tenant)
-		toolResult, timedOut := s.runWithTimeout(callCtx, cancel, params.Name, params.Arguments)
-		if s.callSlots != nil {
-			<-s.callSlots
+		// release fires when the inner goroutine finishes — not when the
+		// HTTP request returns. On timeout the request returns immediately
+		// with ErrCallTimeout but the slot stays held until the runaway
+		// tool actually completes, which is what defends the concurrency
+		// cap from being defeated by slow handlers.
+		release := func() {
+			if s.callSlots != nil {
+				<-s.callSlots
+			}
+			s.inFlight.Add(-1)
 		}
-		s.inFlight.Add(-1)
+		toolResult, timedOut := s.runWithTimeout(callCtx, cancel, params.Name, params.Arguments, release)
 		if timedOut {
 			s.timedOut.Add(1)
 			rpcErr = &RPCError{Code: ErrCallTimeout, Message: fmt.Sprintf("tool %q exceeded %s deadline", params.Name, s.callTimeout)}
@@ -415,23 +421,31 @@ func (s *Server) deriveCallCtx(parent context.Context) (context.Context, context
 	return context.WithTimeout(parent, s.callTimeout)
 }
 
-// runWithTimeout invokes toolHandler with the derived context and returns
-// the result along with a timed-out flag. We always run the tool on a
-// goroutine so that a slow handler can be aborted (its goroutine still
-// runs to completion in the background — toolHandler itself respects the
-// ctx through GORM and time.AfterFunc, so the work eventually winds
-// down). cancel is the CancelFunc returned by deriveCallCtx.
-func (s *Server) runWithTimeout(ctx context.Context, cancel context.CancelFunc, name string, args map[string]any) (ToolCallResult, bool) {
-	defer cancel()
+// runWithTimeout invokes toolHandler with the derived context. The release
+// callback fires AFTER the inner goroutine returns — including on timeout
+// where the request thread has already given up. This keeps the
+// concurrency-cap slot held until the runaway handler actually completes,
+// which is the whole point of the cap.
+//
+// cancel is the CancelFunc from deriveCallCtx; we own its lifecycle so
+// we always invoke it when the goroutine exits (idempotent if already
+// fired by the deadline).
+func (s *Server) runWithTimeout(ctx context.Context, cancel context.CancelFunc, name string, args map[string]any, release func()) (ToolCallResult, bool) {
 	type out struct{ res ToolCallResult }
 	done := make(chan out, 1)
 	go func() {
+		defer cancel()
+		if release != nil {
+			defer release()
+		}
 		done <- out{res: s.toolHandler(ctx, name, args)}
 	}()
 	select {
 	case o := <-done:
 		return o.res, false
 	case <-ctx.Done():
+		// Goroutine still running — slot will be released when it
+		// finishes via the deferred release().
 		return ToolCallResult{}, true
 	}
 }
