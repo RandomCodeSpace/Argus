@@ -181,6 +181,12 @@ type Config struct {
 	// being used outside dev/test. Without it, a production Env + SQLite
 	// combination refuses to start.
 	AllowSqliteProd bool
+
+	// WSMaxClients caps simultaneous WebSocket connections to /ws*
+	// endpoints. 0 = unlimited (default). When set, new connections past
+	// the cap receive HTTP 503. Sized for the operator's expected dashboard
+	// audience — small for ops dashboards, larger for read-heavy public UIs.
+	WSMaxClients int
 }
 
 func Load(customPath string) (*Config, error) {
@@ -284,6 +290,9 @@ func Load(customPath string) (*Config, error) {
 
 		// OTel self-instrumentation
 		OTelExporterEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+
+		// WebSocket admission cap
+		WSMaxClients: getEnvInt("WS_MAX_CLIENTS", 0),
 
 		// Multi-tenancy
 		DefaultTenant:           getEnv("DEFAULT_TENANT", "default"),

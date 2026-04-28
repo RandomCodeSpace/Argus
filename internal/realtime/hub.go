@@ -59,6 +59,13 @@ type Hub struct {
 	maxBufferSize int
 	flushInterval time.Duration
 
+	// maxClients caps simultaneous WebSocket connections. 0 = unlimited
+	// (legacy). When set, HandleWebSocket rejects new connects past the cap
+	// with HTTP 503 instead of admitting unbounded clients that would
+	// exhaust file descriptors and per-client send-channel memory.
+	maxClients  int
+	clientCount atomic.Int64
+
 	stopCh   chan struct{}
 	stopped  atomic.Bool
 	wg       sync.WaitGroup
@@ -122,6 +129,16 @@ func (h *Hub) Run() {
 		select {
 		case <-h.stopCh:
 			h.flush()
+			// Close every client's send channel so the writer goroutines
+			// (blocked on `for msg := range c.send`) wake up and exit.
+			// Without this, writerWg.Wait() in Stop() hangs whenever any
+			// connected client is idle. CAS guard mirrors the unregister
+			// handler so concurrent close paths can't double-close.
+			for c := range h.clients {
+				if c.closed.CompareAndSwap(false, true) {
+					close(c.send)
+				}
+			}
 			return
 
 		case c := <-h.register:
@@ -243,6 +260,20 @@ func (h *Hub) SetDevMode(devMode bool) {
 	h.devMode = devMode
 }
 
+// SetMaxClients caps simultaneous WebSocket connections. 0 disables the cap
+// (default). Configure once at startup before HandleWebSocket starts taking
+// traffic — the cap is read concurrently from each upgrade attempt.
+func (h *Hub) SetMaxClients(n int) {
+	if n < 0 {
+		n = 0
+	}
+	h.maxClients = n
+}
+
+// ActiveClients reports the count of currently-connected WebSocket clients.
+// Updated atomically as connections are accepted and torn down.
+func (h *Hub) ActiveClients() int64 { return h.clientCount.Load() }
+
 // SetWSMetrics wires WebSocket metric callbacks.
 func (h *Hub) SetWSMetrics(onMessageSent func(string), onSlowClientDrop func()) {
 	h.onMessageSent = onMessageSent
@@ -278,10 +309,38 @@ func (h *Hub) Stop() {
 
 // HandleWebSocket is the HTTP handler that upgrades connections to WebSocket.
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Cap admission BEFORE the WebSocket upgrade so a flood of new clients
+	// can't exhaust file descriptors / per-client send-channel memory.
+	// CompareAndSwap-ish reservation: increment optimistically, roll back
+	// if we exceeded the cap. Race-free because clientCount is atomic and
+	// every cleanup path decrements it.
+	if h.maxClients > 0 {
+		if n := h.clientCount.Add(1); n > int64(h.maxClients) {
+			h.clientCount.Add(-1)
+			slog.Warn("WebSocket connection rejected: max-clients cap reached",
+				"max_clients", h.maxClients,
+				"current", n-1,
+				"remote", r.RemoteAddr,
+			)
+			http.Error(w, "WebSocket connections at capacity, retry later", http.StatusServiceUnavailable)
+			return
+		}
+	} else {
+		h.clientCount.Add(1)
+	}
+	clientCounted := true
+	releaseSlot := func() {
+		if clientCounted {
+			clientCounted = false
+			h.clientCount.Add(-1)
+		}
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: h.devMode, // Allow cross-origin in dev mode only
 	})
 	if err != nil {
+		releaseSlot()
 		slog.Error("WebSocket upgrade failed", "error", err)
 		return
 	}
@@ -297,6 +356,10 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.writerWg.Add(1)
 	go func() { // #nosec G118 -- long-lived WS writer goroutine outlives HTTP request intentionally
 		defer h.writerWg.Done()
+		// Release the admission slot when the writer exits — the writer
+		// outlives the HandleWebSocket reader loop, so this is the last
+		// goroutine alive for this client.
+		defer releaseSlot()
 		defer func() {
 			if !h.stopped.Load() {
 				h.unregister <- c
@@ -325,5 +388,13 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
+	}
+	// Force the writer goroutine to exit once the conn is dead, otherwise
+	// it stays blocked on `for msg := range c.send` until the next broadcast
+	// happens to be selected for this client — which leaks the admission
+	// slot and the goroutine indefinitely under low traffic. CAS guard
+	// mirrors every other close site.
+	if c.closed.CompareAndSwap(false, true) {
+		close(c.send)
 	}
 }
