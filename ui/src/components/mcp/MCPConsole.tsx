@@ -1,89 +1,95 @@
 import { useState } from 'react'
-import { Alert, Badge, Button, Card, Grid, Space } from '@ossrandom/design-system'
-import { Plug, RefreshCw } from 'lucide-react'
-import { useMCP } from '@/hooks/useMCP'
-import type { MCPTool } from '@/types/api'
-import ToolCard from './ToolCard'
-import ToolCallModal from './ToolCallModal'
-import RPCPopup from './RPCPopup'
+import { Alert, Badge, Button, Card, CodeBlock, Grid, Input, Space } from '@ossrandom/design-system'
+import { Check, Copy, Terminal } from 'lucide-react'
 
-const statusTone: Record<string, 'info' | 'warning' | 'danger' | 'neutral'> = {
-  idle: 'neutral',
-  connecting: 'warning',
-  connected: 'info',
-  error: 'danger',
+const exampleListTools = `{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/list"
+}`
+
+const exampleToolCall = `{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "get_service_map",
+    "arguments": { "depth": 2 }
+  }
+}`
+
+function curlSnippet(url: string): string {
+  return `curl -N \\
+  -H "Content-Type: application/json" \\
+  -H "Accept: application/json, text/event-stream" \\
+  -d '${exampleListTools.replace(/\n\s*/g, ' ').trim()}' \\
+  ${url}`
 }
 
 export default function MCPConsole() {
-  const { status, tools, error, call, connect, send } = useMCP()
-  const [callTool, setCallTool] = useState<MCPTool | null>(null)
-  const [rpcTool, setRpcTool] = useState<MCPTool | null>(null)
+  const url = `${window.location.origin}/mcp`
+  const [copied, setCopied] = useState(false)
 
-  const header = (
-    <Space justify="between" align="center" wrap>
-      <Space size="xs" align="center" wrap>
-        <Badge tone={statusTone[status]} size="sm">{status}</Badge>
-        <Space size="xs" align="center">
-          <Plug size={11} />
-          <code>{window.location.origin}/mcp</code>
-        </Space>
-        <Badge tone="subtle" size="sm">HTTP Streamable MCP · JSON-RPC 2.0</Badge>
-      </Space>
-      <Button
-        variant="ghost"
-        size="sm"
-        iconLeft={<RefreshCw size={12} />}
-        onClick={() => void connect()}
-      >
-        Reconnect
-      </Button>
-    </Space>
-  )
+  const copyUrl = async () => {
+    await navigator.clipboard.writeText(url)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1500)
+  }
 
   return (
-    <Space direction="vertical" size="md">
-      <Card bordered padding="md" radius="md">
-        {header}
-      </Card>
-
+    <Space direction="vertical" size="lg">
       <Card
         bordered
         padding="md"
         radius="md"
-        title="Available Tools"
-        extra={<Badge tone="subtle" size="sm">{tools.length} discovered</Badge>}
+        title={
+          <Space size="xs" align="center">
+            <Terminal size={14} />
+            <span>MCP Endpoint</span>
+          </Space>
+        }
+        subtitle="HTTP Streamable MCP · JSON-RPC 2.0 · Server-Sent Events"
+        extra={<Badge tone="info" size="sm">live</Badge>}
       >
-        {status === 'error' && (
-          <Alert severity="danger" title="Connection failed">
-            {error || 'Could not reach the MCP endpoint.'} <code>MCP_ENABLED=true</code>
+        <Space direction="vertical" size="md">
+          <Alert severity="info">
+            Point any MCP-compatible client (Claude Desktop, Cursor, custom agents) at the URL below.
+            Authentication: send <code>Authorization: Bearer &lt;API_KEY&gt;</code> if <code>API_KEY</code> is set.
           </Alert>
-        )}
-        {status === 'connected' && (
-          <Grid columns={12} gap="md">
-            {tools.map((tool, index) => (
-              <Grid.Col key={tool.name} span={4}>
-                <ToolCard
-                  tool={tool}
-                  index={index}
-                  onCall={(next) => setCallTool(tools[next])}
-                  onRPC={(next) => setRpcTool(tools[next])}
-                />
-              </Grid.Col>
-            ))}
-          </Grid>
-        )}
+
+          <Space direction="vertical" size="xs">
+            <Input value={url} readOnly type="url" />
+            <Space justify="end">
+              <Button
+                variant="primary"
+                size="sm"
+                iconLeft={copied ? <Check size={12} /> : <Copy size={12} />}
+                onClick={copyUrl}
+              >
+                {copied ? 'Copied' : 'Copy URL'}
+              </Button>
+            </Space>
+          </Space>
+        </Space>
       </Card>
 
-      {callTool && (
-        <ToolCallModal
-          tool={callTool}
-          onClose={() => setCallTool(null)}
-          onCall={async (name, args) =>
-            (await call('tools/call', { name, arguments: args })).result ?? null
-          }
-        />
-      )}
-      {rpcTool && <RPCPopup tool={rpcTool} onClose={() => setRpcTool(null)} onSend={send} />}
+      <Grid columns={12} gap="md">
+        <Grid.Col span={4}>
+          <Card bordered padding="md" radius="md" title="Discover tools" subtitle="JSON-RPC body">
+            <CodeBlock language="json" code={exampleListTools} copyable />
+          </Card>
+        </Grid.Col>
+        <Grid.Col span={4}>
+          <Card bordered padding="md" radius="md" title="Invoke a tool" subtitle="JSON-RPC body">
+            <CodeBlock language="json" code={exampleToolCall} copyable />
+          </Card>
+        </Grid.Col>
+        <Grid.Col span={4}>
+          <Card bordered padding="md" radius="md" title="curl example" subtitle="POST + SSE-aware Accept">
+            <CodeBlock language="bash" code={curlSnippet(url)} copyable />
+          </Card>
+        </Grid.Col>
+      </Grid>
     </Space>
   )
 }
