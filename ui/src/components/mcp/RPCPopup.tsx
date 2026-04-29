@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
-import { Modal, Tabs } from '@mantine/core'
-import { Copy, SendHorizontal, Terminal, X } from 'lucide-react'
+import { Modal, Tabs } from '@ossrandom/design-system'
+import { Copy, SendHorizontal, Terminal } from 'lucide-react'
 import type { MCPTool } from '@/types/api'
 import { colorJSON } from '@/lib/utils'
 
@@ -89,48 +89,30 @@ export default function RPCPopup({ tool, onClose, onSend }: Props) {
     { value: 'custom', label: 'custom' },
   ]
 
+  const title = (
+    <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+      <Terminal size={14} style={{ color: 'var(--color-accent)' }} />
+      <span style={{ fontFamily: 'ui-monospace, monospace' }}>{name}</span>
+      <span className="mc-badge">{method}</span>
+    </span>
+  )
+
   return (
     <Modal
-      opened
+      open
       onClose={onClose}
-      withCloseButton={false}
-      padding={0}
-      size="min(1040px, calc(100vw - 2rem))"
-      centered
-      classNames={{ content: 'mc-modal', overlay: 'mc-overlay' }}
-      styles={{
-        content: { height: '88vh', display: 'flex', flexDirection: 'column' },
-        body: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, padding: 0 },
-      }}
+      title={title}
+      description={tool?.description || 'Manual JSON-RPC request builder'}
+      size="lg"
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.9rem 1.25rem', borderBottom: '1px solid var(--border)' }}>
-        <div style={{ width: 34, height: 34, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, var(--bg-card), var(--bg-panel))', border: '1px solid var(--border-hover)' }}>
-          <Terminal size={14} style={{ color: 'var(--color-accent)' }} />
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-            <span style={{ fontWeight: 700, fontFamily: 'ui-monospace, monospace', fontSize: '0.84rem' }}>{name}</span>
-            <span className="mc-badge">{method}</span>
-          </div>
-          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>{tool?.description || 'Manual JSON-RPC request builder'}</div>
-        </div>
-        <button className="mc-btn-icon" style={{ width: 28, padding: 0, justifyContent: 'center' }} onClick={onClose} aria-label="Close"><X size={13} /></button>
-      </div>
-      <Tabs value={method} onChange={(value) => value && selectMethod(value as RpcMethod)} variant="default" unstyled>
-        <Tabs.List style={{ display: 'flex', gap: '0.1rem', padding: '0 1rem', borderBottom: '1px solid var(--border)', background: 'var(--bg-card)' }}>
-          {methods.map((item) => (
-            <Tabs.Tab
-              key={item.value}
-              value={item.value}
-              style={{ background: 'none', border: 'none', borderBottom: '2px solid transparent', color: 'var(--text-muted)', cursor: 'pointer', padding: '0.5rem 0.75rem', fontSize: '0.7rem', fontFamily: 'ui-monospace, monospace' }}
-            >
-              {item.label}
-            </Tabs.Tab>
-          ))}
-        </Tabs.List>
-      </Tabs>
-      {error && <div style={{ padding: '0.6rem 1.25rem', background: 'rgba(239,68,68,0.08)', borderBottom: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.72rem' }}>{error}</div>}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', flex: 1, minHeight: 0 }}>
+      <Tabs<RpcMethod>
+        items={methods.map((item) => ({ key: item.value, label: item.label }))}
+        value={method}
+        variant="line"
+        onChange={(key) => selectMethod(key)}
+      />
+      {error && <div style={{ padding: '0.6rem 1.25rem', background: 'rgba(239,68,68,0.08)', borderBottom: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.72rem', marginTop: '0.75rem' }}>{error}</div>}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', flex: 1, minHeight: 0, marginTop: '0.75rem' }}>
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, borderRight: '1px solid var(--border)' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.9rem', borderBottom: '1px solid var(--border)' }}>
             <span style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Request</span>

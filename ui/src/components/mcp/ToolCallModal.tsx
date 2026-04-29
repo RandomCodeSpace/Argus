@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Modal } from '@mantine/core'
-import { Play, X } from 'lucide-react'
+import { Modal } from '@ossrandom/design-system'
+import { Play } from 'lucide-react'
 import type { MCPTool } from '@/types/api'
 import { colorJSON } from '@/lib/utils'
 
@@ -50,32 +50,23 @@ export default function ToolCallModal({ tool, onClose, onCall }: Props) {
     }
   }
 
+  const title = (
+    <span style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+      <Play size={12} style={{ color: 'var(--color-accent)' }} />
+      <span>Call</span>
+      <code style={{ background: 'transparent', padding: 0, color: 'var(--color-accent)' }}>{tool.name}</code>
+    </span>
+  )
+
   return (
     <Modal
-      opened
+      open
       onClose={onClose}
-      withCloseButton={false}
-      padding={0}
-      size="min(880px, calc(100vw - 2rem))"
-      centered
-      classNames={{ content: 'mc-modal', overlay: 'mc-overlay' }}
-      styles={{
-        content: { maxHeight: '84vh', display: 'flex', flexDirection: 'column' },
-        body: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, padding: 0 },
-      }}
+      title={title}
+      description={tool.description}
+      size="lg"
     >
-      <div style={{ padding: '0.9rem 1.25rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem' }}>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.82rem', fontWeight: 700 }}>
-            <Play size={12} style={{ color: 'var(--color-accent)' }} />
-            <span>Call</span>
-            <code style={{ background: 'transparent', padding: 0, color: 'var(--color-accent)' }}>{tool.name}</code>
-          </div>
-          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>{tool.description}</div>
-        </div>
-        <button className="mc-btn-icon" style={{ width: 28, padding: 0, justifyContent: 'center' }} onClick={onClose} aria-label="Close"><X size={13} /></button>
-      </div>
-      {error && <div style={{ padding: '0.6rem 1.25rem', background: 'rgba(239,68,68,0.08)', borderBottom: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.72rem' }}>{error}</div>}
+      {error && <div style={{ padding: '0.6rem 1.25rem', background: 'rgba(239,68,68,0.08)', borderBottom: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.72rem', marginBottom: '0.75rem' }}>{error}</div>}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 0, flex: 1 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', padding: '1rem', borderRight: '1px solid var(--border)' }}>
           <label style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Arguments</label>
