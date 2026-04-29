@@ -1,25 +1,58 @@
-import React from 'react';
-import type { SystemNode, SystemEdge } from '../../types/api';
+import React from 'react'
+import { Alert, Badge, Button, IconButton, Space } from '@ossrandom/design-system'
+import { ArrowRight, X } from 'lucide-react'
+import type { SystemNode, SystemEdge } from '../../types/api'
 
 interface ServiceSidePanelProps {
-  node: SystemNode;
-  edges: SystemEdge[];
-  onClose: () => void;
-  onSelectService: (id: string) => void;
-  onViewTraces: (service: string) => void;
-  onViewLogs: (service: string) => void;
+  node: SystemNode
+  edges: SystemEdge[]
+  onClose: () => void
+  onSelectService: (id: string) => void
+  onViewTraces: (service: string) => void
+  onViewLogs: (service: string) => void
 }
 
-const healthColors: Record<string, string> = {
-  healthy: '#22c55e',
-  degraded: '#fb923c',
-  critical: '#ef4444',
-};
+function statusTone(status: string): 'info' | 'warning' | 'danger' | 'neutral' {
+  if (status === 'healthy') return 'info'
+  if (status === 'degraded') return 'warning'
+  if (status === 'critical' || status === 'failing') return 'danger'
+  return 'neutral'
+}
 
-function getHealthBarColor(score: number): string {
-  if (score < 0.4) return '#ef4444';
-  if (score < 0.7) return '#fb923c';
-  return '#22c55e';
+function healthBarColor(score: number): string {
+  if (score < 0.4) return 'var(--brand-red-500)'
+  if (score < 0.7) return 'var(--amber-500)'
+  return 'var(--accent-fg)'
+}
+
+const labelStyle: React.CSSProperties = {
+  fontSize: '0.6rem',
+  textTransform: 'uppercase',
+  letterSpacing: '0.14em',
+  color: 'var(--fg-4)',
+  fontWeight: 700,
+}
+
+const kpiCardStyle: React.CSSProperties = {
+  background: 'var(--bg-2)',
+  border: '1px solid var(--border-1)',
+  borderRadius: 'var(--radius-md)',
+  padding: '0.6rem 0.7rem',
+}
+
+const linkRowStyle: React.CSSProperties = {
+  background: 'var(--bg-2)',
+  border: '1px solid var(--border-1)',
+  borderRadius: 'var(--radius-md)',
+  padding: '0.4rem 0.6rem',
+  marginBottom: '0.3rem',
+  cursor: 'pointer',
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  fontSize: '0.72rem',
+  color: 'var(--fg-2)',
+  transition: 'border-color 120ms ease',
 }
 
 const ServiceSidePanel: React.FC<ServiceSidePanelProps> = ({
@@ -30,241 +63,175 @@ const ServiceSidePanel: React.FC<ServiceSidePanelProps> = ({
   onViewTraces,
   onViewLogs,
 }) => {
-  const statusColor = healthColors[node.status] || '#888';
-  const upstream = edges.filter((e) => e.target === node.id);
-  const downstream = edges.filter((e) => e.source === node.id);
-  const errorRatePercent = (node.metrics.error_rate * 100).toFixed(1);
-  const isHighError = node.metrics.error_rate > 0.05;
+  const upstream = edges.filter((e) => e.target === node.id)
+  const downstream = edges.filter((e) => e.source === node.id)
+  const errorRatePercent = (node.metrics.error_rate * 100).toFixed(1)
+  const isHighError = node.metrics.error_rate > 0.05
 
   return (
-    <div
-      style={{
-        background: '#0a0a0c',
-        border: '1px solid #27272a',
-        borderRadius: 8,
-        padding: 16,
-        width: 320,
-        fontFamily: 'system-ui, sans-serif',
-        color: '#fff',
-      }}
-    >
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16, position: 'relative' }}>
-        <div
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: '50%',
-            background: statusColor,
-            marginRight: 8,
-            flexShrink: 0,
-          }}
-        />
-        <span style={{ fontSize: 13, fontWeight: 'bold', color: '#fff', marginRight: 8 }}>
-          {node.id}
-        </span>
+    <div style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
         <span
           style={{
-            fontSize: 9,
-            textTransform: 'uppercase',
-            background: statusColor,
-            color: '#fff',
-            padding: '2px 6px',
-            borderRadius: 4,
-            fontWeight: 600,
+            fontSize: '0.85rem',
+            fontWeight: 700,
+            color: 'var(--fg-1)',
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            flex: 1,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           }}
         >
-          {node.status}
+          {node.id}
         </span>
-        <button
-          onClick={onClose}
+        <Badge tone={statusTone(node.status)} size="sm">{node.status}</Badge>
+        <IconButton
+          icon={<X size={13} />}
           aria-label="Close"
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 0,
-            background: 'none',
-            border: 'none',
-            color: '#888',
-            cursor: 'pointer',
-            fontSize: 16,
-            lineHeight: 1,
-            padding: 0,
-          }}
-        >
-          X
-        </button>
+          variant="ghost"
+          size="sm"
+          onClick={onClose}
+        />
       </div>
 
-      {/* KPI Grid */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: 8,
-          marginBottom: 16,
-        }}
-      >
-        <div style={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 6, padding: 10 }}>
-          <div style={{ fontSize: 10, color: '#888', marginBottom: 4 }}>RPS</div>
-          <div style={{ fontSize: 16, fontWeight: 'bold' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+        <div style={kpiCardStyle}>
+          <div style={labelStyle}>RPS</div>
+          <div style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--fg-1)', marginTop: '0.2rem', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
             {Math.round(node.metrics.request_rate_rps)}
           </div>
         </div>
-        <div style={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 6, padding: 10 }}>
-          <div style={{ fontSize: 10, color: '#888', marginBottom: 4 }}>Error Rate</div>
-          <div style={{ fontSize: 16, fontWeight: 'bold', color: isHighError ? '#ef4444' : '#fff' }}>
+        <div style={kpiCardStyle}>
+          <div style={labelStyle}>Error Rate</div>
+          <div
+            style={{
+              fontSize: '1rem',
+              fontWeight: 700,
+              color: isHighError ? 'var(--brand-red-500)' : 'var(--fg-1)',
+              marginTop: '0.2rem',
+              fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+            }}
+          >
             {errorRatePercent}%
           </div>
         </div>
-        <div style={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 6, padding: 10 }}>
-          <div style={{ fontSize: 10, color: '#888', marginBottom: 4 }}>Avg Latency</div>
-          <div style={{ fontSize: 16, fontWeight: 'bold' }}>
+        <div style={kpiCardStyle}>
+          <div style={labelStyle}>Avg Latency</div>
+          <div style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--fg-1)', marginTop: '0.2rem', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
             {node.metrics.avg_latency_ms}ms
           </div>
         </div>
-        <div style={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 6, padding: 10 }}>
-          <div style={{ fontSize: 10, color: '#888', marginBottom: 4 }}>P99</div>
-          <div style={{ fontSize: 16, fontWeight: 'bold' }}>
+        <div style={kpiCardStyle}>
+          <div style={labelStyle}>P99</div>
+          <div style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--fg-1)', marginTop: '0.2rem', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
             {node.metrics.p99_latency_ms}ms
           </div>
         </div>
       </div>
 
-      {/* Health Score Bar */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4 }}>
-          <span style={{ color: '#888' }}>Health Score</span>
-          <span style={{ color: '#fff' }}>{node.health_score.toFixed(2)}</span>
+      <div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem', alignItems: 'baseline' }}>
+          <span style={labelStyle}>Health Score</span>
+          <span style={{ fontSize: '0.72rem', color: 'var(--fg-1)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+            {node.health_score.toFixed(2)}
+          </span>
         </div>
-        <div style={{ background: '#27272a', borderRadius: 2, height: 4 }}>
+        <div style={{ background: 'var(--bg-3)', borderRadius: 999, height: 4, overflow: 'hidden' }}>
           <div
             style={{
               width: `${node.health_score * 100}%`,
-              height: 4,
-              borderRadius: 2,
-              background: getHealthBarColor(node.health_score),
+              height: '100%',
+              background: healthBarColor(node.health_score),
+              transition: 'width 200ms ease',
             }}
           />
         </div>
       </div>
 
-      {/* Connected Services */}
       {upstream.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', marginBottom: 6 }}>
-            Upstream
-          </div>
+        <div>
+          <div style={{ ...labelStyle, marginBottom: '0.4rem' }}>Upstream</div>
           {upstream.map((edge) => (
             <div
               key={edge.source}
+              role="button"
+              tabIndex={0}
               onClick={() => onSelectService(edge.source)}
-              style={{
-                background: '#18181b',
-                border: '1px solid #27272a',
-                borderRadius: 6,
-                padding: '6px 10px',
-                marginBottom: 4,
-                cursor: 'pointer',
-                display: 'flex',
-                justifyContent: 'space-between',
-                fontSize: 12,
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  onSelectService(edge.source)
+                }
               }}
+              style={linkRowStyle}
             >
-              <span>{edge.source}</span>
-              <span style={{ color: '#888' }}>{edge.call_count} calls</span>
+              <span style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{edge.source}</span>
+              <span style={{ color: 'var(--fg-3)', fontSize: '0.68rem' }}>{edge.call_count} calls</span>
             </div>
           ))}
         </div>
       )}
+
       {downstream.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', marginBottom: 6 }}>
-            Downstream
-          </div>
+        <div>
+          <div style={{ ...labelStyle, marginBottom: '0.4rem' }}>Downstream</div>
           {downstream.map((edge) => (
             <div
               key={edge.target}
+              role="button"
+              tabIndex={0}
               onClick={() => onSelectService(edge.target)}
-              style={{
-                background: '#18181b',
-                border: '1px solid #27272a',
-                borderRadius: 6,
-                padding: '6px 10px',
-                marginBottom: 4,
-                cursor: 'pointer',
-                display: 'flex',
-                justifyContent: 'space-between',
-                fontSize: 12,
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  onSelectService(edge.target)
+                }
               }}
+              style={linkRowStyle}
             >
-              <span>{edge.target}</span>
-              <span style={{ color: '#888' }}>{edge.call_count} calls</span>
+              <span style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{edge.target}</span>
+              <span style={{ color: 'var(--fg-3)', fontSize: '0.68rem' }}>{edge.call_count} calls</span>
             </div>
           ))}
         </div>
       )}
 
-      {/* Alerts */}
       {node.alerts.length > 0 && (
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', marginBottom: 6 }}>
-            Alerts
+        <div>
+          <div style={{ ...labelStyle, marginBottom: '0.4rem' }}>Alerts</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+            {node.alerts.map((alert, i) => (
+              <Alert key={i} severity="danger">
+                {alert}
+              </Alert>
+            ))}
           </div>
-          {node.alerts.map((alert, i) => (
-            <div
-              key={i}
-              style={{
-                background: '#1c0707',
-                border: '1px solid #27272a',
-                borderRadius: 6,
-                padding: '6px 10px',
-                marginBottom: 4,
-                fontSize: 11,
-                color: '#fca5a5',
-              }}
-            >
-              {alert}
-            </div>
-          ))}
         </div>
       )}
 
-      {/* Action Links */}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button
+      <Space size="xs">
+        <Button
+          variant="secondary"
+          size="sm"
+          block
+          iconRight={<ArrowRight size={11} />}
           onClick={() => onViewTraces(node.id)}
-          style={{
-            flex: 1,
-            background: '#18181b',
-            border: '1px solid #27272a',
-            borderRadius: 6,
-            color: '#fff',
-            padding: '8px 0',
-            cursor: 'pointer',
-            fontSize: 12,
-          }}
         >
-          View Traces &rarr;
-        </button>
-        <button
+          Traces
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          block
+          iconRight={<ArrowRight size={11} />}
           onClick={() => onViewLogs(node.id)}
-          style={{
-            flex: 1,
-            background: '#18181b',
-            border: '1px solid #27272a',
-            borderRadius: 6,
-            color: '#fff',
-            padding: '8px 0',
-            cursor: 'pointer',
-            fontSize: 12,
-          }}
         >
-          View Logs &rarr;
-        </button>
-      </div>
+          Logs
+        </Button>
+      </Space>
     </div>
-  );
-};
+  )
+}
 
-export default React.memo(ServiceSidePanel);
+export default React.memo(ServiceSidePanel)

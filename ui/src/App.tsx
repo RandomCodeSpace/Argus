@@ -52,7 +52,16 @@ export default function App() {
         stats={dash.stats}
         wsConnected={wsConnected}
       />
-      <main className="main-content">
+      <main
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--bg-0)',
+          overflow: 'hidden',
+        }}
+      >
         {view === 'services' && (
           <ServiceMap
             graph={graph.graph}

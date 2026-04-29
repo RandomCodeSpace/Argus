@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { Modal, Tabs } from '@ossrandom/design-system'
+import { useState } from 'react'
+import { Alert, Badge, Button, Modal, Space, Tabs, Textarea } from '@ossrandom/design-system'
 import { Copy, SendHorizontal, Terminal } from 'lucide-react'
 import type { MCPTool } from '@/types/api'
 import { colorJSON } from '@/lib/utils'
@@ -30,6 +30,14 @@ const templates: Record<Exclude<RpcMethod, 'custom'>, (name?: string, args?: Rec
   'resources/list': () => ({ jsonrpc: '2.0', id: 1, method: 'resources/list' }),
 }
 
+const labelStyle: React.CSSProperties = {
+  fontSize: '0.62rem',
+  textTransform: 'uppercase',
+  letterSpacing: '0.12em',
+  color: 'var(--fg-4)',
+  fontWeight: 700,
+}
+
 export default function RPCPopup({ tool, onClose, onSend }: Props) {
   const name = tool?.name ?? 'tool_name'
   const args = tool ? buildDefaultArgs(tool) : {}
@@ -39,7 +47,7 @@ export default function RPCPopup({ tool, onClose, onSend }: Props) {
   const [timing, setTiming] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
-  const copyRef = useRef<HTMLButtonElement | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const selectMethod = (next: RpcMethod) => {
     setMethod(next)
@@ -72,12 +80,8 @@ export default function RPCPopup({ tool, onClose, onSend }: Props) {
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(requestText)
-    if (!copyRef.current) return
-    const old = copyRef.current.innerHTML
-    copyRef.current.textContent = 'Copied'
-    window.setTimeout(() => {
-      if (copyRef.current) copyRef.current.innerHTML = old
-    }, 1200)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1200)
   }
 
   const methods: { value: RpcMethod; label: string }[] = [
@@ -90,11 +94,11 @@ export default function RPCPopup({ tool, onClose, onSend }: Props) {
   ]
 
   const title = (
-    <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-      <Terminal size={14} style={{ color: 'var(--color-accent)' }} />
-      <span style={{ fontFamily: 'ui-monospace, monospace' }}>{name}</span>
-      <span className="mc-badge">{method}</span>
-    </span>
+    <Space size="xs" align="center">
+      <Terminal size={14} style={{ color: 'var(--accent-fg)' }} />
+      <span style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{name}</span>
+      <Badge tone="subtle" size="sm">{method}</Badge>
+    </Space>
   )
 
   return (
@@ -111,26 +115,55 @@ export default function RPCPopup({ tool, onClose, onSend }: Props) {
         variant="line"
         onChange={(key) => selectMethod(key)}
       />
-      {error && <div style={{ padding: '0.6rem 1.25rem', background: 'rgba(239,68,68,0.08)', borderBottom: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.72rem', marginTop: '0.75rem' }}>{error}</div>}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', flex: 1, minHeight: 0, marginTop: '0.75rem' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, borderRight: '1px solid var(--border)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.9rem', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Request</span>
-            <button ref={copyRef} className="mc-copy-btn" onClick={handleCopy}><Copy size={11} /> Copy</button>
+
+      {error && <div style={{ marginTop: '0.75rem' }}><Alert severity="danger">{error}</Alert></div>}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', minHeight: 0, marginTop: '0.75rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <label style={labelStyle}>Request</label>
+            <Button variant="ghost" size="sm" iconLeft={<Copy size={11} />} onClick={handleCopy}>
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
           </div>
-          <div style={{ padding: '0.75rem', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            <textarea className="mc-textarea" style={{ flex: 1, minHeight: 0 }} value={requestText} onChange={(event) => setRequestText(event.target.value)} spellCheck={false} />
-          </div>
-          <div style={{ padding: '0 0.75rem 0.75rem' }}>
-            <button className="mc-send-btn" disabled={sending} onClick={handleSend} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.45rem' }}><SendHorizontal size={12} /> {sending ? 'Sending…' : 'Send'}</button>
-          </div>
+          <Textarea
+            value={requestText}
+            onChange={(value) => setRequestText(value)}
+            rows={14}
+          />
+          <Button variant="primary" block loading={sending} disabled={sending} iconLeft={<SendHorizontal size={12} />} onClick={handleSend}>
+            {sending ? 'Sending' : 'Send'}
+          </Button>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0.6rem 0.9rem', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Response</span>
-            {timing && <span className="mc-badge">{timing}</span>}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', minHeight: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <label style={labelStyle}>Response</label>
+            {timing && (
+              <Badge tone="subtle" size="sm">
+                {timing}
+              </Badge>
+            )}
           </div>
-          <pre className="mc-code" style={{ margin: '0.75rem', flex: 1, minHeight: 0, overflow: 'auto', padding: '0.9rem' }} dangerouslySetInnerHTML={{ __html: responseHTML || '<span style="color:var(--text-dim)">—</span>' }} />
+          <pre
+            style={{
+              flex: 1,
+              minHeight: '16rem',
+              overflow: 'auto',
+              padding: '0.9rem',
+              margin: 0,
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-3)',
+              border: '1px solid var(--border-1)',
+              color: 'var(--fg-2)',
+              fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+              fontSize: '0.72rem',
+              lineHeight: 1.55,
+            }}
+            dangerouslySetInnerHTML={{
+              __html: responseHTML || '<span style="color:var(--fg-4)">—</span>',
+            }}
+          />
         </div>
       </div>
     </Modal>

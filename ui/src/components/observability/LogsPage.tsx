@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { VariableSizeList, type ListChildComponentProps } from 'react-window'
+import { Alert, Badge, Button, Card, IconButton, Input, Space } from '@ossrandom/design-system'
+import { Search, X } from 'lucide-react'
 import type { LogEntry } from '@/types/api'
 
 interface Props {
@@ -12,8 +14,6 @@ interface Props {
   onClearFilter: () => void
 }
 
-// Row height estimate — base + per-line cost for wrapped bodies. Kept crude per spec
-// (estimate first; measure only if visually off). Includes the 0.55rem inter-row gap.
 const LOG_BASE_HEIGHT = 62
 const LOG_LINE_HEIGHT = 19
 const LOG_CHARS_PER_LINE = 80
@@ -29,23 +29,66 @@ interface RowData {
   logs: LogEntry[]
 }
 
+function severityTone(severity: string): 'danger' | 'warning' | 'info' {
+  if (severity === 'ERROR') return 'danger'
+  if (severity === 'WARN') return 'warning'
+  return 'info'
+}
+
 function LogRow({ index, style, data }: ListChildComponentProps<RowData>) {
   const log = data.logs[index]
   return (
     <div style={{ ...style, paddingBottom: `${LOG_GAP}px`, boxSizing: 'border-box' }}>
-      <div style={{ padding: '0.75rem 0.9rem', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg-card)', height: '100%', boxSizing: 'border-box', overflow: 'hidden' }}>
+      <div
+        style={{
+          padding: '0.7rem 0.85rem',
+          borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border-1)',
+          background: 'var(--bg-2)',
+          height: '100%',
+          boxSizing: 'border-box',
+          overflow: 'hidden',
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.35rem' }}>
-          <div style={{ display: 'flex', gap: '0.45rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className={`badge ${log.severity === 'ERROR' ? 'badge-red' : log.severity === 'WARN' ? 'badge-orange' : 'badge-blue'}`}>{log.severity}</span>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{log.service_name}</span>
-          </div>
-          <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>{new Date(log.timestamp).toLocaleTimeString()}</span>
+          <Space size="xs" align="center">
+            <Badge tone={severityTone(log.severity)} size="sm">{log.severity}</Badge>
+            <span style={{ fontSize: '0.72rem', color: 'var(--fg-3)' }}>{log.service_name}</span>
+          </Space>
+          <span style={{ fontSize: '0.66rem', color: 'var(--fg-4)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+            {new Date(log.timestamp).toLocaleTimeString()}
+          </span>
         </div>
-        <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', lineHeight: 1.6, wordBreak: 'break-word' }}>{log.body}</div>
+        <div
+          style={{
+            fontSize: '0.74rem',
+            color: 'var(--fg-2)',
+            lineHeight: 1.6,
+            wordBreak: 'break-word',
+            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+          }}
+        >
+          {log.body}
+        </div>
       </div>
     </div>
   )
 }
+
+const labelStyle: React.CSSProperties = {
+  fontSize: '0.62rem',
+  textTransform: 'uppercase',
+  letterSpacing: '0.14em',
+  color: 'var(--fg-4)',
+  fontWeight: 700,
+}
+
+const SEVERITIES: { value: string; label: string }[] = [
+  { value: '', label: 'all' },
+  { value: 'INFO', label: 'info' },
+  { value: 'WARN', label: 'warn' },
+  { value: 'ERROR', label: 'error' },
+]
 
 export default function LogsPage({ logs, similar, loading, error, onSimilar, serviceFilter, onClearFilter }: Props) {
   const [query, setQuery] = useState('')
@@ -79,7 +122,6 @@ export default function LogsPage({ logs, similar, loading, error, onSimilar, ser
     return () => observer.disconnect()
   }, [])
 
-  // Invalidate cached sizes whenever the list contents or width change.
   useEffect(() => {
     listRef.current?.resetAfterIndex(0)
   }, [filtered, streamSize.width])
@@ -87,43 +129,106 @@ export default function LogsPage({ logs, similar, loading, error, onSimilar, ser
   const getItemSize = (index: number): number => estimateLogHeight(filtered[index]?.body ?? '')
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 420px) minmax(0, 1fr)', gap: '1rem', minHeight: 0, flex: 1 }}>
-      <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem', minHeight: 0 }}>
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(320px, 420px) minmax(0, 1fr)',
+        gap: '1rem',
+        minHeight: 0,
+        flex: 1,
+        padding: '1rem',
+        overflow: 'hidden',
+      }}
+    >
+      <Card bordered padding="md" radius="md" style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem', minHeight: 0 }}>
         <div>
-          <div style={{ fontSize: '0.74rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', marginBottom: '0.35rem' }}>Live Log Search</div>
-          <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>Tail, filter, and query similar incidents</div>
+          <div style={labelStyle}>Live Log Search</div>
+          <div style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--fg-1)', marginTop: '0.2rem' }}>
+            Tail, filter, and query similar incidents
+          </div>
         </div>
         {serviceFilter && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, padding: '4px 8px', background: '#1e3a5f', borderRadius: 4, fontSize: 11, color: '#38bdf8' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+              padding: '0.3rem 0.5rem',
+              background: 'var(--accent-soft)',
+              border: '1px solid var(--accent-fg)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: '0.7rem',
+              color: 'var(--accent-fg)',
+            }}
+          >
             <span>Filtered: {serviceFilter}</span>
-            <button onClick={onClearFilter} style={{ background: 'none', border: 'none', color: '#38bdf8', cursor: 'pointer', fontSize: 12 }}>×</button>
+            <IconButton
+              icon={<X size={11} />}
+              aria-label="Clear filter"
+              variant="ghost"
+              size="xs"
+              onClick={onClearFilter}
+            />
           </div>
         )}
-        <input className="search-input" style={{ paddingLeft: '10px' }} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find similar logs..." spellCheck={false} />
-        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-          {['', 'INFO', 'WARN', 'ERROR'].map((value) => (
-            <button key={value || 'all'} className={`mode-pill${severity === value ? ' active' : ''}`} onClick={() => setSeverity(value)}>{value || 'all'}</button>
+        <Input
+          value={query}
+          onChange={(value) => setQuery(value)}
+          placeholder="Find similar logs"
+          size="sm"
+          prefix={<Search size={12} />}
+        />
+        <Space size="xs" wrap>
+          {SEVERITIES.map((item) => (
+            <Button
+              key={item.value || 'all'}
+              variant={severity === item.value ? 'secondary' : 'ghost'}
+              size="sm"
+              onClick={() => setSeverity(item.value)}
+            >
+              {item.label}
+            </Button>
           ))}
-        </div>
-        <button className="mc-send-btn" disabled={!query.trim()} onClick={() => onSimilar(query)}>Run Similarity Search</button>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', overflow: 'auto' }}>
+        </Space>
+        <Button variant="primary" block disabled={!query.trim()} onClick={() => onSimilar(query)}>
+          Run Similarity Search
+        </Button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', overflow: 'auto', minHeight: 0 }}>
           {similar.map((log) => (
-            <div key={`similar-${log.id}`} style={{ border: '1px solid var(--border)', borderRadius: 10, padding: '0.8rem', background: 'var(--bg-card)' }}>
+            <div
+              key={`similar-${log.id}`}
+              style={{
+                border: '1px solid var(--border-1)',
+                borderRadius: 'var(--radius-md)',
+                padding: '0.7rem 0.8rem',
+                background: 'var(--bg-2)',
+              }}
+            >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.35rem' }}>
-                <div style={{ fontWeight: 700, fontSize: '0.76rem' }}>{log.service_name}</div>
-                <span className={`badge ${log.severity === 'ERROR' ? 'badge-red' : log.severity === 'WARN' ? 'badge-orange' : 'badge-blue'}`}>{log.severity}</span>
+                <div style={{ fontWeight: 700, fontSize: '0.76rem', color: 'var(--fg-1)' }}>{log.service_name}</div>
+                <Badge tone={severityTone(log.severity)} size="sm">{log.severity}</Badge>
               </div>
-              <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>{log.body}</div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--fg-2)', lineHeight: 1.5, fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+                {log.body}
+              </div>
             </div>
           ))}
+          {similar.length === 0 && query.trim() && (
+            <div style={{ fontSize: '0.72rem', color: 'var(--fg-3)' }}>No similar logs yet — run search.</div>
+          )}
         </div>
-      </div>
-      <div className="card" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+      </Card>
+
+      <Card bordered padding="md" radius="md" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.8rem', flexShrink: 0 }}>
-          <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>Stream</div>
-          {loading && <span className="badge">Loading…</span>}
+          <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--fg-1)' }}>Stream</div>
+          {loading && <Badge tone="subtle" size="sm">Loading</Badge>}
         </div>
-        {error && <div style={{ color: '#ef4444', marginBottom: '0.8rem', flexShrink: 0 }}>{error}</div>}
+        {error && (
+          <div style={{ marginBottom: '0.7rem', flexShrink: 0 }}>
+            <Alert severity="danger">{error}</Alert>
+          </div>
+        )}
         <div ref={streamContainerRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
           {streamSize.height > 0 && filtered.length > 0 && (
             <VariableSizeList<RowData>
@@ -139,8 +244,11 @@ export default function LogsPage({ logs, similar, loading, error, onSimilar, ser
               {LogRow}
             </VariableSizeList>
           )}
+          {!loading && filtered.length === 0 && (
+            <div style={{ fontSize: '0.75rem', color: 'var(--fg-3)' }}>No logs yet.</div>
+          )}
         </div>
-      </div>
+      </Card>
     </div>
   )
 }

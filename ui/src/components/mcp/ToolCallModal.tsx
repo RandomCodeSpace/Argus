@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Modal } from '@ossrandom/design-system'
+import { Alert, Badge, Button, Modal, Textarea } from '@ossrandom/design-system'
 import { Play } from 'lucide-react'
 import type { MCPTool } from '@/types/api'
 import { colorJSON } from '@/lib/utils'
@@ -18,6 +18,14 @@ function buildDefaultArgs(tool: MCPTool): Record<string, unknown> {
     args[key] = req.includes(key) ? (value.type === 'number' ? 0 : value.type === 'boolean' ? false : '') : null
   }
   return args
+}
+
+const labelStyle: React.CSSProperties = {
+  fontSize: '0.62rem',
+  textTransform: 'uppercase',
+  letterSpacing: '0.12em',
+  color: 'var(--fg-4)',
+  fontWeight: 700,
 }
 
 export default function ToolCallModal({ tool, onClose, onCall }: Props) {
@@ -52,33 +60,57 @@ export default function ToolCallModal({ tool, onClose, onCall }: Props) {
 
   const title = (
     <span style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
-      <Play size={12} style={{ color: 'var(--color-accent)' }} />
+      <Play size={12} style={{ color: 'var(--accent-fg)' }} />
       <span>Call</span>
-      <code style={{ background: 'transparent', padding: 0, color: 'var(--color-accent)' }}>{tool.name}</code>
+      <code style={{ background: 'transparent', padding: 0, color: 'var(--accent-fg)' }}>{tool.name}</code>
     </span>
   )
 
   return (
-    <Modal
-      open
-      onClose={onClose}
-      title={title}
-      description={tool.description}
-      size="lg"
-    >
-      {error && <div style={{ padding: '0.6rem 1.25rem', background: 'rgba(239,68,68,0.08)', borderBottom: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.72rem', marginBottom: '0.75rem' }}>{error}</div>}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 0, flex: 1 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', padding: '1rem', borderRight: '1px solid var(--border)' }}>
-          <label style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Arguments</label>
-          <textarea className="mc-textarea" style={{ flex: 1, minHeight: '16rem' }} value={argsText} onChange={(event) => setArgsText(event.target.value)} spellCheck={false} />
-          <button className="mc-send-btn" disabled={calling} onClick={handleCall}>{calling ? 'Executing…' : 'Execute Tool'}</button>
+    <Modal open onClose={onClose} title={title} description={tool.description} size="lg">
+      {error && <Alert severity="danger">{error}</Alert>}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', minHeight: 0, marginTop: error ? '0.75rem' : 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+          <label style={labelStyle}>Arguments</label>
+          <Textarea
+            value={argsText}
+            onChange={(value) => setArgsText(value)}
+            rows={14}
+          />
+          <Button variant="primary" block loading={calling} disabled={calling} onClick={handleCall}>
+            {calling ? 'Executing' : 'Execute Tool'}
+          </Button>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', padding: '1rem', minHeight: 0 }}>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem', minHeight: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <label style={{ fontSize: '0.62rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700 }}>Result</label>
-            {timing && <span className="mc-badge">{timing}</span>}
+            <label style={labelStyle}>Result</label>
+            {timing && (
+              <Badge tone="subtle" size="sm">
+                {timing}
+              </Badge>
+            )}
           </div>
-          <pre className="mc-code" style={{ flex: 1, minHeight: '16rem', overflow: 'auto', padding: '0.9rem' }} dangerouslySetInnerHTML={{ __html: resultHTML || '<span style="color:var(--text-dim)">—</span>' }} />
+          <pre
+            style={{
+              flex: 1,
+              minHeight: '16rem',
+              overflow: 'auto',
+              padding: '0.9rem',
+              margin: 0,
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-3)',
+              border: '1px solid var(--border-1)',
+              color: 'var(--fg-2)',
+              fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+              fontSize: '0.72rem',
+              lineHeight: 1.55,
+            }}
+            dangerouslySetInnerHTML={{
+              __html: resultHTML || '<span style="color:var(--fg-4)">—</span>',
+            }}
+          />
         </div>
       </div>
     </Modal>

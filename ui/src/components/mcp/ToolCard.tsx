@@ -1,3 +1,4 @@
+import { Badge, Button, Card, Space } from '@ossrandom/design-system'
 import { Play, Terminal } from 'lucide-react'
 import type { MCPTool } from '@/types/api'
 
@@ -14,26 +15,47 @@ export default function ToolCard({ tool, index, onCall, onRPC }: Props) {
   const paramCount = Object.keys(props).length
 
   return (
-    <div className="mc-tool-card">
-      <div style={{ position: 'absolute', inset: '0 0 auto 0', height: 2, background: 'linear-gradient(90deg, var(--color-accent), var(--color-accent-hover))' }} />
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.4rem' }}>
-        <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-primary)' }}>{tool.name}</span>
-        {paramCount > 0 && <span className="mc-badge" style={{ fontSize: '0.6rem' }}>{paramCount}p</span>}
-      </div>
-      <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.55, marginBottom: '0.75rem', minHeight: '3.2em' }}>{tool.description || 'No description provided.'}</p>
-      {paramCount > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem', marginBottom: '0.8rem' }}>
-          {Object.entries(props).map(([key, value]) => (
-            <span key={key} className={`mc-param-tag ${req.includes(key) ? 'mc-param-req' : 'mc-param-opt'}`}>
-              {key}<span style={{ opacity: 0.45, marginLeft: 2 }}>:{value.type ?? 'any'}</span>
-            </span>
-          ))}
+    <Card bordered hoverable padding="md" radius="md">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', height: '100%' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.5rem' }}>
+          <span style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: '0.8rem', fontWeight: 700, color: 'var(--fg-1)' }}>
+            {tool.name}
+          </span>
+          {paramCount > 0 && (
+            <Badge tone="neutral" size="sm">
+              {paramCount}p
+            </Badge>
+          )}
         </div>
-      )}
-      <div style={{ display: 'flex', gap: '0.4rem', marginTop: 'auto' }}>
-        <button className="mc-btn-call" onClick={() => onCall(index)} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}><Play size={10} /> Call</button>
-        <button className="mc-btn-rpc" onClick={() => onRPC(index)} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}><Terminal size={10} /> JSON-RPC</button>
+
+        <p style={{ fontSize: '0.72rem', color: 'var(--fg-3)', lineHeight: 1.55, margin: 0, minHeight: '3.2em' }}>
+          {tool.description || 'No description provided.'}
+        </p>
+
+        {paramCount > 0 && (
+          <Space size="xs" wrap>
+            {Object.entries(props).map(([key, value]) => (
+              <Badge key={key} tone={req.includes(key) ? 'danger' : 'neutral'} size="sm">
+                <span style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+                  {key}
+                  <span style={{ opacity: 0.55, marginLeft: 2 }}>:{value.type ?? 'any'}</span>
+                </span>
+              </Badge>
+            ))}
+          </Space>
+        )}
+
+        <div style={{ marginTop: 'auto' }}>
+          <Space size="xs">
+            <Button variant="primary" size="sm" iconLeft={<Play size={10} />} onClick={() => onCall(index)}>
+              Call
+            </Button>
+            <Button variant="ghost" size="sm" iconLeft={<Terminal size={10} />} onClick={() => onRPC(index)}>
+              JSON-RPC
+            </Button>
+          </Space>
+        </div>
       </div>
-    </div>
+    </Card>
   )
 }
