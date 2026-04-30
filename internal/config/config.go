@@ -109,6 +109,26 @@ type Config struct {
 	// Vector Index
 	VectorIndexMaxEntries int
 
+	// VectorIndexSnapshotPath is the on-disk location for periodic vectordb
+	// snapshots. When empty, persistence is disabled and the index rebuilds
+	// from DB on every restart (legacy behaviour). Default
+	// "data/vectordb.snapshot".
+	VectorIndexSnapshotPath string
+
+	// VectorIndexSnapshotInterval, e.g. "5m". When set and
+	// VectorIndexSnapshotPath is non-empty, the index serializes its state
+	// to disk on this cadence. "0" / empty disables periodic writes (a
+	// final snapshot still fires on graceful shutdown). Default "5m".
+	VectorIndexSnapshotInterval string
+
+	// LogFTSEnabled toggles SQLite FTS5 provisioning + querying. The FTS5
+	// inverted index typically consumes 30-40% of SQLite DB disk for
+	// log-heavy workloads, while the LIKE fallback (log_repo.go:105) keeps
+	// search_logs functional without it. Default false; opt in with
+	// LOG_FTS_ENABLED=true. Only meaningful on SQLite; Postgres uses pg_trgm
+	// independently of this flag.
+	LogFTSEnabled bool
+
 	// GraphRAG worker count (background consumers of the ingestion event channel).
 	// Defaults to 4 if unset or <=0. Increase under sustained high ingest.
 	GraphRAGWorkerCount int
@@ -274,7 +294,12 @@ func Load(customPath string) (*Config, error) {
 		CompressionLevel: getEnv("COMPRESSION_LEVEL", "default"),
 
 		// Vector
-		VectorIndexMaxEntries: getEnvInt("VECTOR_INDEX_MAX_ENTRIES", 100000),
+		VectorIndexMaxEntries:       getEnvInt("VECTOR_INDEX_MAX_ENTRIES", 100000),
+		VectorIndexSnapshotPath:     getEnv("VECTOR_INDEX_SNAPSHOT_PATH", "data/vectordb.snapshot"),
+		VectorIndexSnapshotInterval: getEnv("VECTOR_INDEX_SNAPSHOT_INTERVAL", "5m"),
+
+		// Log search FTS5 toggle (SQLite only). Default off — see field comment.
+		LogFTSEnabled: parseTruthy(getEnv("LOG_FTS_ENABLED", "")),
 
 		// GraphRAG
 		GraphRAGWorkerCount:    getEnvInt("GRAPHRAG_WORKER_COUNT", 16),

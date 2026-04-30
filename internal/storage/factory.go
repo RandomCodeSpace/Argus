@@ -296,9 +296,18 @@ func AutoMigrateModelsWithOptions(db *gorm.DB, driver string, opts MigrateOption
 	// SQLite: provision FTS5 virtual table + triggers on logs.body / logs.service_name.
 	// Search routes through bm25() ranking on this driver; LIKE remains the fallback
 	// if FTS5 is unavailable (older SQLite builds without FTS5 compiled in).
+	//
+	// Gated on LOG_FTS_ENABLED (default false) — FTS5's inverted index typically
+	// consumes 30-40% of SQLite DB disk for log-heavy workloads. When disabled,
+	// search_logs falls back transparently to LIKE via the existing branch in
+	// log_repo.go:105.
 	if driver == "sqlite" || driver == "" {
-		if err := setupSQLiteFTS5(db); err != nil {
-			log.Printf("⚠️  SQLite FTS5 setup failed (%v) — log search will fall back to LIKE", err)
+		if logFTSEnabledFromEnv() {
+			if err := setupSQLiteFTS5(db); err != nil {
+				log.Printf("⚠️  SQLite FTS5 setup failed (%v) — log search will fall back to LIKE", err)
+			}
+		} else {
+			log.Println("ℹ️  SQLite FTS5 disabled (LOG_FTS_ENABLED=false) — log search uses LIKE")
 		}
 	}
 

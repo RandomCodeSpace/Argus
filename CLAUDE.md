@@ -59,8 +59,8 @@ When none are present, `DEFAULT_TENANT` (default `"default"`) is assigned. Every
 | GraphRAG (in-memory) | `internal/graphrag/` | Layered graph: 4 typed stores, error chains, root cause analysis, anomaly detection |
 | Time Series (in-memory) | `internal/tsdb/` | Ring buffer, sliding windows, pre-computed percentiles |
 | Graph (in-memory, legacy) | `internal/graph/` | Simple service topology — **being replaced by GraphRAG** |
-| Vector (embedded) | `internal/vectordb/` | TF-IDF index for semantic log search (pure Go, no CGO). Retained as a fallback similarity index for SQLite mode and for `SimilarErrors` ranking within a Drain template cluster. |
-| Relational (persistent) | `internal/storage/` | GORM-based, multi-DB, single source of truth. Driven by `RetentionScheduler` (hourly batched purge + daily VACUUM/ANALYZE). `logs.body` is plain TEXT. **Log search**: SQLite uses FTS5 virtual table `logs_fts` (porter+unicode61 tokenizer) ordered by `bm25()`, kept in sync via AFTER INSERT/DELETE/UPDATE triggers; Postgres uses `pg_trgm` GIN on `logs.body` and `logs.service_name`. `AttributesJSON` and `AIInsight` remain `CompressedText`. |
+| Vector (embedded) | `internal/vectordb/` | TF-IDF index for semantic log search (pure Go, no CGO). Persisted across restarts via gob+CRC32 snapshot (default `data/vectordb.snapshot`, 5m interval) plus a startup tail-replay from the DB so the index is warm before listeners accept traffic — eliminating the legacy minutes of cold-start blindness. `find_similar_logs` and `SimilarErrors` (within a Drain template cluster) are the read-side consumers. |
+| Relational (persistent) | `internal/storage/` | GORM-based, multi-DB, single source of truth. Driven by `RetentionScheduler` (hourly batched purge + daily VACUUM/ANALYZE). `logs.body` is plain TEXT. **Log search**: vectordb (TF-IDF) is the default semantic-search path. Optional SQLite FTS5 (`logs_fts`, porter+unicode61, ordered by `bm25()`, AFTER INSERT/DELETE/UPDATE triggers) is **opt-in via `LOG_FTS_ENABLED=true`** and disabled by default — operators who toggle it off can reclaim the FTS table + indexes via `POST /api/admin/drop_fts`. Postgres uses `pg_trgm` GIN on `logs.body` and `logs.service_name`. `AttributesJSON` and `AIInsight` remain `CompressedText`. The `search_logs` MCP tool and the API `/api/logs?q=…` filter are clamped to the **last 24 hours** to bound the LIKE-fallback worst case. |
 
 ## GraphRAG Architecture
 
@@ -190,7 +190,7 @@ internal/
   storage/      # GORM repository, models, migrations, Close() method
   telemetry/    # Prometheus metrics + health (19 metrics)
   tsdb/         # Time series aggregator + ring buffer (lock-free Windows())
-  vectordb/     # Embedded TF-IDF vector index (FIFO eviction with copy, clean IDF rebuild)
+  vectordb/     # Embedded TF-IDF vector index (FIFO eviction with copy, clean IDF rebuild). Persisted via gob+CRC32 snapshot + startup DB tail-replay (snapshot.go, replay.go).
   ui/           # Embedded React frontend
 ui/             # React frontend (Vite + Mantine)
 test/           # Microservice simulation (7 services)
@@ -213,7 +213,8 @@ Key settings in `internal/config/config.go`:
 - `METRIC_MAX_CARDINALITY` (10000), `METRIC_MAX_CARDINALITY_PER_TENANT` (0 = unlimited), `API_RATE_LIMIT_RPS` (100). The per-tenant cap is checked first; when set, a noisy tenant cannot exhaust the global pool. Overflow is labeled by tenant via `otelcontext_tsdb_cardinality_overflow_by_tenant_total{tenant_id}` (`__global__` sentinel when the global cap was the trigger).
 - `MCP_ENABLED` (true), `MCP_PATH` (/mcp)
 - `MCP_MAX_CONCURRENT` (32), `MCP_CALL_TIMEOUT_MS` (30000), `MCP_CACHE_TTL_MS` (5000) — MCP HTTP streamable robustness. Counting semaphore gates concurrent `tools/call` (JSON-RPC `-32000` past the cap), per-call deadlines abort runaway handlers (JSON-RPC `-32001`), and a 5s TTL cache memoizes the cheap in-memory GraphRAG tools (`get_service_map`, `impact_analysis`, `root_cause_analysis`, `get_anomaly_timeline`, `get_service_health`). SSE GET sends a `: keep-alive\n\n` comment every 25s to keep the stream alive across reverse-proxy idle timeouts. Set any to 0 to disable.
-- `VECTOR_INDEX_MAX_ENTRIES` (100000)
+- `VECTOR_INDEX_MAX_ENTRIES` (100000), `VECTOR_INDEX_SNAPSHOT_PATH` (`data/vectordb.snapshot`), `VECTOR_INDEX_SNAPSHOT_INTERVAL` (`5m`) — vectordb persistence. Empty `VECTOR_INDEX_SNAPSHOT_PATH` or non-positive interval disables the snapshot loop. The snapshot file uses a magic+version+CRC32 wire format with gob payload; corrupt or version-mismatched files are rejected and the loader falls back to a full DB rebuild via `ReplayFromDB`. Watch `otelcontext_vectordb_snapshot_writes_total{result}`, `otelcontext_vectordb_snapshot_load_total{result}`, `otelcontext_vectordb_snapshot_size_bytes`, and `otelcontext_vectordb_replay_logs_total`.
+- `LOG_FTS_ENABLED` (false) — when truthy (`true`/`yes`/`on`/`1`), provisions the SQLite FTS5 `logs_fts` virtual table + sync triggers at startup; when false, log-search uses vectordb (semantic) plus a 24h-clamped LIKE fallback. Toggle off and reclaim disk via `POST /api/admin/drop_fts` (refused while the flag is on).
 - `DLQ_MAX_FILES` (1000), `DLQ_MAX_DISK_MB` (500), `DLQ_MAX_RETRIES` (10)
 - `GRAPHRAG_WORKER_COUNT` (16), `GRAPHRAG_EVENT_QUEUE_SIZE` (100000) — sized for 100–200 services; raise further if `otelcontext_graphrag_events_dropped_total` climbs
 - `INGEST_ASYNC_ENABLED` (true), `INGEST_PIPELINE_QUEUE_SIZE` (50000), `INGEST_PIPELINE_WORKERS` (8) — async ingest pipeline (`internal/ingest/pipeline.go`). Hybrid backpressure: <90% accept all, 90–100% drop healthy batches (errors/slow always pass), 100% return gRPC `RESOURCE_EXHAUSTED`. Set `INGEST_ASYNC_ENABLED=false` to revert to synchronous DB writes inside `Export()`. Drops surface as `otelcontext_ingest_pipeline_dropped_total{signal,reason}`.
