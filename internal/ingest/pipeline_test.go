@@ -239,8 +239,11 @@ func TestPipeline_PreservesInsertionOrder(t *testing.T) {
 	if err := p.Submit(healthyBatch()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().Processed == 1 }) {
-		t.Fatalf("worker did not process batch within deadline")
+	// Sync on the assertion target — the per-signal call sequence — rather
+	// than Stats().Processed, which can bump between BatchCreate calls under
+	// the race detector and trip the length check on a partial slice.
+	if !waitFor(t, 5*time.Second, func() bool { return len(w.snapshotOrder()) >= 3 }) {
+		t.Fatalf("worker did not record 3 calls within deadline (got %v)", w.snapshotOrder())
 	}
 
 	got := w.snapshotOrder()
@@ -273,8 +276,37 @@ func TestPipeline_CallbacksFireAfterPersistence(t *testing.T) {
 	if err := p.Submit(b); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return spanHits.Load() == 1 && logHits.Load() == 1 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return spanHits.Load() == 1 && logHits.Load() == 1 }) {
 		t.Fatalf("callbacks did not fire (span=%d log=%d, want 1/1)", spanHits.Load(), logHits.Load())
+	}
+}
+
+// runFailureSkipsCheck wires up a 1-worker pipeline with the configured
+// fakeWriter, submits a healthy batch, waits for the failure to surface,
+// then asserts that none of the forbidden BatchCreate* calls fired.
+// Shared by the trace-fails and span-fails skip tests so the boilerplate
+// (pipeline lifecycle + waitFor) lives in one place.
+func runFailureSkipsCheck(t *testing.T, w *fakeWriter, forbidden ...string) {
+	t.Helper()
+	p := NewPipeline(w, nil, PipelineConfig{Capacity: 2, Workers: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p.Start(ctx)
+	t.Cleanup(p.Stop)
+
+	if err := p.Submit(healthyBatch()); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return p.Stats().ProcessFailures > 0 }) {
+		t.Fatalf("expected ProcessFailures > 0, got %d", p.Stats().ProcessFailures)
+	}
+	calls := w.snapshotOrder()
+	for _, c := range calls {
+		for _, f := range forbidden {
+			if c == f {
+				t.Fatalf("%s ran after upstream failure — order=%v", f, calls)
+			}
+		}
 	}
 }
 
@@ -283,25 +315,7 @@ func TestPipeline_FailedSpansSkipsLogs(t *testing.T) {
 	// batch — preserves the invariant that orphan logs aren't persisted
 	// without their span. Mirrors the synchronous path's behavior of
 	// returning the span error before log insert.
-	w := &fakeWriter{spanErr: errors.New("span db down")}
-	p := NewPipeline(w, nil, PipelineConfig{Capacity: 2, Workers: 1})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	p.Start(ctx)
-	t.Cleanup(p.Stop)
-
-	if err := p.Submit(healthyBatch()); err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().ProcessFailures > 0 }) {
-		t.Fatalf("expected ProcessFailures > 0, got %d", p.Stats().ProcessFailures)
-	}
-	calls := w.snapshotOrder()
-	for _, c := range calls {
-		if c == "logs" {
-			t.Fatalf("BatchCreateLogs ran after spans failed — order=%v", calls)
-		}
-	}
+	runFailureSkipsCheck(t, &fakeWriter{spanErr: errors.New("span db down")}, "logs")
 }
 
 func TestPipeline_FailedTracesAbortsBatch(t *testing.T) {
@@ -309,25 +323,7 @@ func TestPipeline_FailedTracesAbortsBatch(t *testing.T) {
 	// fix for orphan FK rows when a worker crashes between BatchCreate*
 	// calls. Spans and logs must NOT be persisted when the trace insert
 	// fails. Counterpart of TestPipeline_FailedSpansSkipsLogs.
-	w := &fakeWriter{traceErr: errors.New("transient")}
-	p := NewPipeline(w, nil, PipelineConfig{Capacity: 2, Workers: 1})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	p.Start(ctx)
-	t.Cleanup(p.Stop)
-
-	if err := p.Submit(healthyBatch()); err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().ProcessFailures > 0 }) {
-		t.Fatalf("expected ProcessFailures > 0, got %d", p.Stats().ProcessFailures)
-	}
-	calls := w.snapshotOrder()
-	for _, c := range calls {
-		if c == "spans" || c == "logs" {
-			t.Fatalf("spans/logs ran after trace failure — order=%v", calls)
-		}
-	}
+	runFailureSkipsCheck(t, &fakeWriter{traceErr: errors.New("transient")}, "spans", "logs")
 }
 
 func TestPipeline_DrainsOnStop(t *testing.T) {
@@ -493,15 +489,17 @@ func TestPipeline_PerTenantCap_ReleasedAfterProcess(t *testing.T) {
 	if err := p.Submit(mk()); err != nil {
 		t.Fatalf("submit 1: %v", err)
 	}
-	// Wait for the worker to drain it (and release the slot).
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().Processed == 1 }) {
+	// Wait for the worker to drain it (and release the slot). 5s tolerates
+	// the race detector's overhead on slow CI runners — the test passes
+	// locally in milliseconds.
+	if !waitFor(t, 5*time.Second, func() bool { return p.Stats().Processed == 1 }) {
 		t.Fatalf("worker did not process first batch")
 	}
 	// Second batch must succeed because the slot was released.
 	if err := p.Submit(mk()); err != nil {
 		t.Fatalf("submit 2 after release: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().Processed == 2 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return p.Stats().Processed == 2 }) {
 		t.Fatalf("worker did not process second batch")
 	}
 	if got := p.TenantDropped(); got != 0 {
@@ -542,7 +540,7 @@ func TestPipeline_PanicInCallbackRecovered(t *testing.T) {
 	if err := p.Submit(good); err != nil {
 		t.Fatalf("submit good: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().Processed >= 2 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return p.Stats().Processed >= 2 }) {
 		t.Fatalf("worker did not survive callback panic — Processed=%d", p.Stats().Processed)
 	}
 	if p.Stats().ProcessFailures == 0 {
