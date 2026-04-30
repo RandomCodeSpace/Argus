@@ -2,10 +2,10 @@ package ui
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
-	"path"
 	"strings"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/graph"
@@ -13,6 +13,33 @@ import (
 	"github.com/RandomCodeSpace/otelcontext/internal/telemetry"
 	"github.com/RandomCodeSpace/otelcontext/internal/vectordb"
 )
+
+// spaFS wraps an fs.FS so http.FileServer transparently serves index.html
+// for any extensionless path that doesn't resolve to a real file — the
+// usual single-page-app routing where the React router owns client-side
+// URLs. Asset-shaped paths (anything with a ".") still 404 normally so a
+// missing /favicon.ico doesn't surprise the browser with an HTML body.
+//
+// Wrapping the FS — rather than calling Open() against r.URL.Path in our
+// own handler — keeps the user-controlled name behind the stdlib
+// http.FileServer boundary, where path.Clean has already happened.
+type spaFS struct{ fs.FS }
+
+func (s spaFS) Open(name string) (fs.File, error) {
+	f, err := s.FS.Open(name)
+	if err == nil {
+		return f, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	// SPA fallback only for extensionless paths (treated as client-side
+	// routes); legitimate asset 404s still propagate.
+	if strings.Contains(name, ".") {
+		return nil, err
+	}
+	return s.FS.Open("index.html")
+}
 
 //go:embed static/* dist
 var content embed.FS
@@ -47,39 +74,15 @@ func (s *Server) SetMCPConfig(enabled bool, path string) {
 func (s *Server) RegisterRoutes(mux *http.ServeMux) error {
 	mux.Handle("/static/", http.FileServer(http.FS(content)))
 
-	// Serve React SPA from dist/ for all non-API paths.
-	// API routes are registered before this is called, so they take priority.
+	// Serve React SPA from dist/ for all non-API paths. API routes are
+	// registered before this is called, so they take priority. spaFS
+	// converts extensionless 404s into index.html so the React router
+	// can claim them.
 	distFS, err := fs.Sub(content, "dist")
 	if err != nil {
 		return fmt.Errorf("ui: failed to create dist sub-fs: %w", err)
 	}
-	fileServer := http.FileServer(http.FS(distFS))
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Sanitize: clean the URL path and reject anything that would escape
-		// the dist root. embed.FS already rejects ".." segments, but we
-		// gate at the boundary so static analyzers don't have to taint-track
-		// the user-supplied URL through the FS call.
-		clean := path.Clean("/" + r.URL.Path)
-		if strings.Contains(clean, "..") {
-			http.NotFound(w, r)
-			return
-		}
-		rel := strings.TrimPrefix(clean, "/")
-		if rel == "" {
-			rel = "index.html"
-		}
-		// Try the file as-is; if not found, fall back to index.html (SPA routing).
-		f, openErr := distFS.Open(rel)
-		if openErr == nil {
-			_ = f.Close()
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		// SPA fallback — let the React router handle the path.
-		r2 := r.Clone(r.Context())
-		r2.URL.Path = "/"
-		fileServer.ServeHTTP(w, r2)
-	})
+	mux.Handle("/", http.FileServer(http.FS(spaFS{distFS})))
 
 	return nil
 }
