@@ -35,7 +35,7 @@ var toolDefs = []Tool{
 	},
 	{
 		Name:        "search_logs",
-		Description: "Searches log entries by severity, service, body text, trace ID, and time range. Returns id, timestamp, severity, service_name, body, trace_id. Default window is last 24h. Use severity=ERROR to find errors, query= for full-text search, trace_id= to correlate with a trace. Use page= for pagination.",
+		Description: "Searches log entries by severity, service, body text, trace ID, and time range. Returns id, timestamp, severity, service_name, body, trace_id. **Limited to the last 24 hours** — windows entirely outside the 24h cap are rejected. Strongly recommend setting `service` and/or `severity` to scope the search; unscoped keyword queries scan large row counts when FTS5 is disabled (the default). Use severity=ERROR to find errors, query= for full-text search, trace_id= to correlate with a trace. Use page= for pagination.",
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]Property{
@@ -43,8 +43,8 @@ var toolDefs = []Tool{
 				"severity": {Type: "string", Description: "Filter by severity level: ERROR, WARN, INFO, DEBUG."},
 				"service":  {Type: "string", Description: "Filter by service name (exact match)."},
 				"trace_id": {Type: "string", Description: "Filter logs belonging to a specific trace ID."},
-				"start":    {Type: "string", Description: "Start time RFC3339. Defaults to 24h ago."},
-				"end":      {Type: "string", Description: "End time RFC3339. Defaults to now."},
+				"start":    {Type: "string", Description: "Start time RFC3339. Defaults to 24h ago. Cannot be earlier than now-24h; older values are clamped."},
+				"end":      {Type: "string", Description: "End time RFC3339. Defaults to now. Cannot exceed now; future values are clamped."},
 				"limit":    {Type: "number", Description: "Max results per page (default 50, max 200)."},
 				"page":     {Type: "number", Description: "Page number for pagination (default 0)."},
 			},
@@ -431,10 +431,18 @@ func toLogSummaries(logs []storage.Log) []logSummary {
 }
 
 func (s *Server) toolSearchLogs(ctx context.Context, args map[string]any) ToolCallResult {
-	end := time.Now()
-	start := end.Add(-24 * time.Hour) // wider default window for AI agents
+	var start, end time.Time
 	parseTime(args, "start", &start)
 	parseTime(args, "end", &end)
+
+	// Enforce the 24h cap centrally so an MCP caller cannot bypass via the
+	// alternate HTTP transport. clampTo24h handles defaults (zero values) and
+	// returns a clean error when the window is entirely older than the cap.
+	clampedStart, clampedEnd, capErr := storage.ClampSearchWindowTo24h(start, end, time.Now())
+	if capErr != nil {
+		return errorResult(capErr.Error())
+	}
+	start, end = clampedStart, clampedEnd
 
 	limit := argInt(args, "limit", 50)
 	if limit > 200 {

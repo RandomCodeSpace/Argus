@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -43,8 +44,10 @@ func TestFTS5MatchExpr_Quoting(t *testing.T) {
 	}
 }
 
-// TestFTS5Available_DriverGate verifies that only sqlite uses the FTS5 path.
+// TestFTS5Available_DriverGate verifies that only sqlite uses the FTS5 path
+// when the LOG_FTS_ENABLED flag is on.
 func TestFTS5Available_DriverGate(t *testing.T) {
+	t.Setenv("LOG_FTS_ENABLED", "true")
 	cases := []struct {
 		driver string
 		want   bool
@@ -60,6 +63,54 @@ func TestFTS5Available_DriverGate(t *testing.T) {
 		if got := fts5Available(c.driver); got != c.want {
 			t.Fatalf("fts5Available(%q) = %v, want %v", c.driver, got, c.want)
 		}
+	}
+}
+
+// TestFTS5Available_FlagGate verifies the LOG_FTS_ENABLED toggle.
+func TestFTS5Available_FlagGate(t *testing.T) {
+	cases := []struct {
+		flag string
+		want bool
+	}{
+		{"", false},      // empty value present = unparsable = false
+		{"false", false}, // explicit off
+		{"0", false},
+		{"no", false},
+		{"true", true},
+		{"1", true},
+		{"yes", true},
+		{"on", true},
+		{"YES", true},
+		{"TRUE", true},
+	}
+	for _, c := range cases {
+		t.Run(c.flag, func(t *testing.T) {
+			t.Setenv("LOG_FTS_ENABLED", c.flag)
+			if got := fts5Available("sqlite"); got != c.want {
+				t.Fatalf("fts5Available(sqlite) with LOG_FTS_ENABLED=%q = %v, want %v", c.flag, got, c.want)
+			}
+		})
+	}
+}
+
+// TestFTS5Available_DefaultOff verifies the absence of LOG_FTS_ENABLED yields
+// false. Uses os.Unsetenv directly because t.Setenv only sets values, never
+// unsets — and the test's whole point is to assert behavior when the env var
+// is unset.
+func TestFTS5Available_DefaultOff(t *testing.T) {
+	prev, hadPrev := os.LookupEnv("LOG_FTS_ENABLED")
+	if err := os.Unsetenv("LOG_FTS_ENABLED"); err != nil {
+		t.Fatalf("unsetenv: %v", err)
+	}
+	t.Cleanup(func() {
+		if hadPrev {
+			_ = os.Setenv("LOG_FTS_ENABLED", prev)
+		} else {
+			_ = os.Unsetenv("LOG_FTS_ENABLED")
+		}
+	})
+	if fts5Available("sqlite") {
+		t.Fatal("FTS5 must default off when LOG_FTS_ENABLED is unset")
 	}
 }
 
