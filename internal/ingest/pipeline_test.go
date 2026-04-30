@@ -239,8 +239,11 @@ func TestPipeline_PreservesInsertionOrder(t *testing.T) {
 	if err := p.Submit(healthyBatch()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().Processed == 1 }) {
-		t.Fatalf("worker did not process batch within deadline")
+	// Sync on the assertion target — the per-signal call sequence — rather
+	// than Stats().Processed, which can bump between BatchCreate calls under
+	// the race detector and trip the length check on a partial slice.
+	if !waitFor(t, 5*time.Second, func() bool { return len(w.snapshotOrder()) >= 3 }) {
+		t.Fatalf("worker did not record 3 calls within deadline (got %v)", w.snapshotOrder())
 	}
 
 	got := w.snapshotOrder()
@@ -273,7 +276,7 @@ func TestPipeline_CallbacksFireAfterPersistence(t *testing.T) {
 	if err := p.Submit(b); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return spanHits.Load() == 1 && logHits.Load() == 1 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return spanHits.Load() == 1 && logHits.Load() == 1 }) {
 		t.Fatalf("callbacks did not fire (span=%d log=%d, want 1/1)", spanHits.Load(), logHits.Load())
 	}
 }
@@ -293,7 +296,7 @@ func TestPipeline_FailedSpansSkipsLogs(t *testing.T) {
 	if err := p.Submit(healthyBatch()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().ProcessFailures > 0 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return p.Stats().ProcessFailures > 0 }) {
 		t.Fatalf("expected ProcessFailures > 0, got %d", p.Stats().ProcessFailures)
 	}
 	calls := w.snapshotOrder()
@@ -319,7 +322,7 @@ func TestPipeline_FailedTracesAbortsBatch(t *testing.T) {
 	if err := p.Submit(healthyBatch()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().ProcessFailures > 0 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return p.Stats().ProcessFailures > 0 }) {
 		t.Fatalf("expected ProcessFailures > 0, got %d", p.Stats().ProcessFailures)
 	}
 	calls := w.snapshotOrder()
@@ -544,7 +547,7 @@ func TestPipeline_PanicInCallbackRecovered(t *testing.T) {
 	if err := p.Submit(good); err != nil {
 		t.Fatalf("submit good: %v", err)
 	}
-	if !waitFor(t, 2*time.Second, func() bool { return p.Stats().Processed >= 2 }) {
+	if !waitFor(t, 5*time.Second, func() bool { return p.Stats().Processed >= 2 }) {
 		t.Fatalf("worker did not survive callback panic — Processed=%d", p.Stats().Processed)
 	}
 	if p.Stats().ProcessFailures == 0 {
