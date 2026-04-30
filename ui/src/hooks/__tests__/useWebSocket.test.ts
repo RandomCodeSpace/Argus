@@ -5,12 +5,12 @@ import { act, renderHook } from '@testing-library/react'
 // changes. Tracks all instances so assertions can reach into the last
 // constructed socket.
 class MockWebSocket {
-  static CONNECTING = 0
-  static OPEN = 1
-  static CLOSING = 2
-  static CLOSED = 3
+  static readonly CONNECTING = 0
+  static readonly OPEN = 1
+  static readonly CLOSING = 2
+  static readonly CLOSED = 3
 
-  static instances: MockWebSocket[] = []
+  static readonly instances: MockWebSocket[] = []
 
   readyState = MockWebSocket.CONNECTING
   url: string
@@ -42,15 +42,15 @@ class MockWebSocket {
   }
 
   simulateMessage(data: unknown) {
-    const ev = new MessageEvent('message', { data: JSON.stringify(data) })
-    this.onmessage?.(ev as MessageEvent<string>)
+    const ev = new MessageEvent<string>('message', { data: JSON.stringify(data) })
+    this.onmessage?.(ev)
   }
 }
 
 const OriginalWebSocket = globalThis.WebSocket
 
 beforeEach(() => {
-  MockWebSocket.instances = []
+  MockWebSocket.instances.length = 0
   vi.stubGlobal('WebSocket', MockWebSocket as unknown as typeof WebSocket)
   vi.useFakeTimers()
 })

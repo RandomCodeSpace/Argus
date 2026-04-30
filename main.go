@@ -243,7 +243,7 @@ func main() {
 		if err := json.Unmarshal(data, &envelope); err != nil {
 			// Legacy format: try to deserialize as []storage.Log
 			var logs []storage.Log
-			if err2 := json.Unmarshal(data, &logs); err2 != nil {
+			if json.Unmarshal(data, &logs) != nil {
 				return fmt.Errorf("DLQ replay unmarshal failed: %w", err)
 			}
 			return repo.BatchCreateLogs(logs)
@@ -605,16 +605,20 @@ func main() {
 
 	// Resolve TLS material once: explicit cert-file > self-signed > plaintext.
 	// Both gRPC and HTTP reuse the same resolved paths below.
+	const (
+		tlsModeCertFile   = "cert-file"
+		tlsModeSelfSigned = "self-signed"
+	)
 	var (
 		tlsCertPath string
 		tlsKeyPath  string
-		tlsMode     string // "cert-file", "self-signed", or "" (plaintext)
+		tlsMode     string // tlsModeCertFile, tlsModeSelfSigned, or "" (plaintext)
 	)
 	switch {
 	case cfg.TLSCertFileMode():
 		tlsCertPath = cfg.TLSCertFile
 		tlsKeyPath = cfg.TLSKeyFile
-		tlsMode = "cert-file"
+		tlsMode = tlsModeCertFile
 	case cfg.TLSSelfsignedMode():
 		cp, kp, err := tlsbootstrap.EnsureSelfSignedCert(cfg.TLSCacheDir)
 		if err != nil {
@@ -622,7 +626,7 @@ func main() {
 		}
 		tlsCertPath = cp
 		tlsKeyPath = kp
-		tlsMode = "self-signed"
+		tlsMode = tlsModeSelfSigned
 	}
 
 	// Start gRPC Server
@@ -664,20 +668,20 @@ func main() {
 		"max_concurrent_streams", streams,
 	)
 	switch tlsMode {
-	case "cert-file":
+	case tlsModeCertFile:
 		creds, err := credentials.NewServerTLSFromFile(tlsCertPath, tlsKeyPath)
 		if err != nil {
 			fatal("Failed to load gRPC TLS credentials", err)
 		}
 		grpcOpts = append(grpcOpts, grpc.Creds(creds))
-		slog.Info("🔒 gRPC TLS enabled", "mode", "cert-file")
-	case "self-signed":
+		slog.Info("🔒 gRPC TLS enabled", "mode", tlsModeCertFile)
+	case tlsModeSelfSigned:
 		creds, err := credentials.NewServerTLSFromFile(tlsCertPath, tlsKeyPath)
 		if err != nil {
 			fatal("Failed to load gRPC TLS credentials (self-signed)", err)
 		}
 		grpcOpts = append(grpcOpts, grpc.Creds(creds))
-		slog.Info("🔒 gRPC TLS enabled", "mode", "self-signed", "cache_dir", cfg.TLSCacheDir)
+		slog.Info("🔒 gRPC TLS enabled", "mode", tlsModeSelfSigned, "cache_dir", cfg.TLSCacheDir)
 	default:
 		slog.Info("🔓 gRPC plaintext — not for production; set TLS_CERT_FILE/TLS_KEY_FILE or TLS_AUTO_SELFSIGNED=true")
 	}

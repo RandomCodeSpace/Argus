@@ -158,8 +158,8 @@ func EnsureLogsPartitionForDay(db *gorm.DB, day time.Time) error {
 	ddl := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS %s PARTITION OF logs FOR VALUES FROM ('%s') TO ('%s')`,
 		quoteIdent(name),
-		d.Format("2006-01-02 15:04:05+00"),
-		upper.Format("2006-01-02 15:04:05+00"),
+		d.Format(timeFormatPGUTC),
+		upper.Format(timeFormatPGUTC),
 	)
 	if err := db.Exec(ddl).Error; err != nil {
 		return fmt.Errorf("create partition %s: %w", name, err)
@@ -283,7 +283,7 @@ func parsePartitionUpper(boundExpr string) (time.Time, bool) {
 	// parse it as RFC3339-ish. Try a few layouts.
 	layouts := []string{
 		"2006-01-02 15:04:05-07",
-		"2006-01-02 15:04:05+00",
+		timeFormatPGUTC,
 		"2006-01-02 15:04:05Z07:00",
 		"2006-01-02 15:04:05",
 	}

@@ -154,19 +154,19 @@ func NewRepository(metrics *telemetry.Metrics) (*Repository, error) {
 	// Register GORM Callback for DB Latency Metrics
 	if metrics != nil {
 		_ = db.Callback().Query().Before("gorm:query").Register("telemetry:before_query", func(d *gorm.DB) {
-			d.Set("telemetry:start_time", time.Now())
+			d.Set(cacheKeyTelemetryStart, time.Now())
 		})
 		_ = db.Callback().Query().After("gorm:query").Register("telemetry:after_query", func(d *gorm.DB) {
-			if start, ok := d.Get("telemetry:start_time"); ok {
+			if start, ok := d.Get(cacheKeyTelemetryStart); ok {
 				duration := time.Since(start.(time.Time)).Seconds()
 				metrics.ObserveDBLatency(duration)
 			}
 		})
 		_ = db.Callback().Create().Before("gorm:create").Register("telemetry:before_create", func(d *gorm.DB) {
-			d.Set("telemetry:start_time", time.Now())
+			d.Set(cacheKeyTelemetryStart, time.Now())
 		})
 		_ = db.Callback().Create().After("gorm:create").Register("telemetry:after_create", func(d *gorm.DB) {
-			if start, ok := d.Get("telemetry:start_time"); ok {
+			if start, ok := d.Get(cacheKeyTelemetryStart); ok {
 				duration := time.Since(start.(time.Time)).Seconds()
 				metrics.ObserveDBLatency(duration)
 			}
@@ -200,11 +200,11 @@ func (r *Repository) GetStats(ctx context.Context) (map[string]any, error) {
 	var logCount int64
 	var errorCount int64
 
-	if err := db.Model(&Trace{}).Where("tenant_id = ?", tenant).Count(&traceCount).Error; err != nil {
+	if err := db.Model(&Trace{}).Where(sqlWhereTenantID, tenant).Count(&traceCount).Error; err != nil {
 		return nil, fmt.Errorf("failed to count traces: %w", err)
 	}
 
-	if err := db.Model(&Log{}).Where("tenant_id = ?", tenant).Count(&logCount).Error; err != nil {
+	if err := db.Model(&Log{}).Where(sqlWhereTenantID, tenant).Count(&logCount).Error; err != nil {
 		return nil, fmt.Errorf("failed to count logs: %w", err)
 	}
 
@@ -214,9 +214,9 @@ func (r *Repository) GetStats(ctx context.Context) (map[string]any, error) {
 
 	// Count distinct services across both logs and traces (tenant-scoped).
 	var serviceNames []string
-	db.Model(&Log{}).Where("tenant_id = ?", tenant).Distinct("service_name").Pluck("service_name", &serviceNames)
+	db.Model(&Log{}).Where(sqlWhereTenantID, tenant).Distinct("service_name").Pluck("service_name", &serviceNames)
 	traceServices := []string{}
-	db.Model(&Trace{}).Where("tenant_id = ?", tenant).Distinct("service_name").Pluck("service_name", &traceServices)
+	db.Model(&Trace{}).Where(sqlWhereTenantID, tenant).Distinct("service_name").Pluck("service_name", &traceServices)
 	serviceSet := make(map[string]struct{}, len(serviceNames)+len(traceServices))
 	for _, s := range serviceNames {
 		if s != "" {
@@ -290,7 +290,7 @@ func NewRepositoryFromDB(db *gorm.DB, driver string) *Repository {
 func (r *Repository) RecentTraces(ctx context.Context, limit int) ([]Trace, error) {
 	tenant := TenantFromContext(ctx)
 	var traces []Trace
-	if err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).Order("timestamp desc").Limit(limit).Find(&traces).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where(sqlWhereTenantID, tenant).Order(sqlOrderTimestampDesc).Limit(limit).Find(&traces).Error; err != nil {
 		return nil, err
 	}
 	return traces, nil
@@ -300,7 +300,7 @@ func (r *Repository) RecentTraces(ctx context.Context, limit int) ([]Trace, erro
 func (r *Repository) RecentLogs(ctx context.Context, limit int) ([]Log, error) {
 	tenant := TenantFromContext(ctx)
 	var logs []Log
-	if err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).Order("timestamp desc").Limit(limit).Find(&logs).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where(sqlWhereTenantID, tenant).Order(sqlOrderTimestampDesc).Limit(limit).Find(&logs).Error; err != nil {
 		return nil, err
 	}
 	return logs, nil
@@ -318,7 +318,7 @@ func (r *Repository) SearchLogs(ctx context.Context, query string, limit int) ([
 		return r.searchLogsFTS5(ctx, tenant, query, limit)
 	}
 	var logs []Log
-	db := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).Order("timestamp desc").Limit(limit)
+	db := r.db.WithContext(ctx).Where(sqlWhereTenantID, tenant).Order(sqlOrderTimestampDesc).Limit(limit)
 	if query != "" {
 		op := r.likeOp()
 		db = db.Where(fmt.Sprintf("body %s ? OR service_name %s ?", op, op), "%"+query+"%", "%"+query+"%")
@@ -337,7 +337,7 @@ func (r *Repository) searchLogsFTS5(ctx context.Context, tenant, query string, l
 	matchExpr := fts5MatchExpr(query)
 	if matchExpr == "" {
 		var logs []Log
-		err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).Order("timestamp desc").Limit(limit).Find(&logs).Error
+		err := r.db.WithContext(ctx).Where(sqlWhereTenantID, tenant).Order(sqlOrderTimestampDesc).Limit(limit).Find(&logs).Error
 		return logs, err
 	}
 	var logs []Log
@@ -368,7 +368,7 @@ func (r *Repository) searchLogsLikeFallback(ctx context.Context, tenant, query s
 	err := r.db.WithContext(ctx).
 		Where("tenant_id = ?", tenant).
 		Where(fmt.Sprintf("body %s ? OR service_name %s ?", op, op), "%"+query+"%", "%"+query+"%").
-		Order("timestamp desc").
+		Order(sqlOrderTimestampDesc).
 		Limit(limit).
 		Find(&logs).Error
 	return logs, err

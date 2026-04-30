@@ -130,7 +130,7 @@ func TestHTTPBackpressure_TracesReturns429WithRetryAfter(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("want 429, got %d (body=%q)", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Retry-After"); got == "" {
+	if rec.Header().Get("Retry-After") == "" {
 		t.Fatal("Retry-After header missing on 429 response")
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != contentTypeProtobuf {

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/RandomCodeSpace/otelcontext/internal/httpconst"
 )
 
 // handleGetStats handles GET /api/stats
@@ -18,7 +20,7 @@ func (s *Server) handleGetStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(stats)
 }
 
@@ -50,7 +52,7 @@ func (s *Server) handlePurge(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Admin purge completed", "days", days, "logs_purged", logsDeleted, "traces_purged", tracesDeleted)
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"logs_purged":   logsDeleted,
 		"traces_purged": tracesDeleted,
@@ -65,7 +67,7 @@ func (s *Server) handleVacuum(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "vacuumed"})
 }
 
@@ -110,7 +112,7 @@ func (s *Server) handleDropFTS(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("drop_fts completed", "elapsed_ms", elapsed.Milliseconds(), "reclaimed_bytes", reclaimed)
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"reclaimed_bytes": reclaimed,
 		"elapsed_ms":      elapsed.Milliseconds(),

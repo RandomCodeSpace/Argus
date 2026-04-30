@@ -39,7 +39,7 @@ GIT_USER_EMAIL=${GIT_USER_EMAIL:-$(git config --global --get user.email 2>/dev/n
 GIT_SIGNING_KEY=${GIT_SIGNING_KEY:-$(git config --global --get user.signingkey 2>/dev/null || echo "$HOME/.ssh/id_ed25519.pub")}
 GIT_GPG_FORMAT=${GIT_GPG_FORMAT:-$(git config --global --get gpg.format 2>/dev/null || echo "ssh")}
 
-if [ -z "$GIT_USER_NAME" ] || [ -z "$GIT_USER_EMAIL" ]; then
+if [[ -z "$GIT_USER_NAME" || -z "$GIT_USER_EMAIL" ]]; then
   cat >&2 <<'EOF'
 error: contributor identity not set.
 
@@ -62,7 +62,7 @@ fi
 #   - x509:    user.signingkey is a key id / fingerprint (gpgsm must know it)
 case "$GIT_GPG_FORMAT" in
   ssh)
-    if [ ! -f "$GIT_SIGNING_KEY" ]; then
+    if [[ ! -f "$GIT_SIGNING_KEY" ]]; then
       cat >&2 <<EOF
 error: SSH signing key not found at $GIT_SIGNING_KEY
 

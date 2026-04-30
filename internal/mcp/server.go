@@ -14,6 +14,7 @@ import (
 	"github.com/RandomCodeSpace/central-ops/pkg/httputil"
 	"github.com/RandomCodeSpace/otelcontext/internal/graph"
 	"github.com/RandomCodeSpace/otelcontext/internal/graphrag"
+	"github.com/RandomCodeSpace/otelcontext/internal/httpconst"
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 	"github.com/RandomCodeSpace/otelcontext/internal/telemetry"
 	"github.com/RandomCodeSpace/otelcontext/internal/vectordb"
@@ -209,7 +210,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handleRPC processes JSON-RPC 2.0 requests.
 func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB cap
 	if err != nil {
@@ -321,7 +322,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	case "resources/list":
 		result = map[string]any{
 			"resources": []map[string]any{
-				{"uri": "OtelContext://system/graph", "name": "System Graph", "mimeType": "application/json"},
+				{"uri": "OtelContext://system/graph", "name": "System Graph", "mimeType": httpconst.ContentTypeJSON},
 				{"uri": "OtelContext://metrics/prometheus", "name": "Prometheus Metrics", "mimeType": "text/plain"},
 			},
 		}
@@ -406,7 +407,7 @@ func writeSSE(w http.ResponseWriter, f http.Flusher, event, data string) {
 
 // writeError writes a JSON-RPC error response.
 func writeError(w http.ResponseWriter, id any, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	resp := JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,

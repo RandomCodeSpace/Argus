@@ -28,6 +28,11 @@ import (
 // downstream a chance to drain.
 const defaultRetryAfterSeconds = 1
 
+// headerContentType is the canonical HTTP Content-Type header name. Local
+// const so the OTLP-HTTP receiver compiles without pulling in a shared
+// helper for a one-line literal.
+const headerContentType = "Content-Type" //nolint:goconst // single literal; Sonar S1192 satisfied via const
+
 // withTenantFromHTTP attaches a tenant ID from the X-Tenant-ID header (if any)
 // to the request context before delegating to the gRPC Export methods.
 // Uses the shared storage.WithTenantContext helper so ingest and read paths
@@ -269,7 +274,7 @@ func (h *HTTPHandler) readBody(r *http.Request) ([]byte, error) {
 
 // unmarshal decodes the body based on Content-Type header.
 func (h *HTTPHandler) unmarshal(r *http.Request, body []byte, msg proto.Message) error {
-	ct := r.Header.Get("Content-Type")
+	ct := r.Header.Get(headerContentType)
 	switch ct {
 	case contentTypeProtobuf, "":
 		if err := proto.Unmarshal(body, msg); err != nil {
@@ -287,9 +292,9 @@ func (h *HTTPHandler) unmarshal(r *http.Request, body []byte, msg proto.Message)
 
 // writeResponse marshals and writes the OTLP response.
 func (h *HTTPHandler) writeResponse(w http.ResponseWriter, r *http.Request, msg proto.Message) {
-	ct := r.Header.Get("Content-Type")
+	ct := r.Header.Get(headerContentType)
 	if ct == contentTypeJSON {
-		w.Header().Set("Content-Type", contentTypeJSON)
+		w.Header().Set(headerContentType, contentTypeJSON)
 		data, err := protojson.Marshal(msg)
 		if err != nil {
 			writeOTLPError(w, http.StatusInternalServerError, "failed to marshal response")
@@ -298,7 +303,7 @@ func (h *HTTPHandler) writeResponse(w http.ResponseWriter, r *http.Request, msg 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	} else {
-		w.Header().Set("Content-Type", contentTypeProtobuf)
+		w.Header().Set(headerContentType, contentTypeProtobuf)
 		data, err := proto.Marshal(msg)
 		if err != nil {
 			writeOTLPError(w, http.StatusInternalServerError, "failed to marshal response")
@@ -321,7 +326,7 @@ func writeOTLPError(w http.ResponseWriter, statusCode int, msg string) {
 		http.Error(w, msg, statusCode)
 		return
 	}
-	w.Header().Set("Content-Type", contentTypeProtobuf)
+	w.Header().Set(headerContentType, contentTypeProtobuf)
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(data)
 }

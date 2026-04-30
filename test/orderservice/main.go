@@ -24,6 +24,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+const serviceName = "order-service"
+
 var (
 	tracer       trace.Tracer
 	orderCounter metric.Int64Counter
@@ -34,7 +36,7 @@ func initOTel() func(context.Context) error {
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceName("order-service"),
+			semconv.ServiceName(serviceName),
 		),
 	)
 	if err != nil {
@@ -74,7 +76,7 @@ func initOTel() func(context.Context) error {
 	)
 	otel.SetMeterProvider(mp)
 
-	meter := otel.Meter("order-service")
+	meter := otel.Meter(serviceName)
 	orderCounter, _ = meter.Int64Counter("orders_processed_total", metric.WithDescription("Total number of orders processed"))
 
 	return func(ctx context.Context) error {
@@ -88,7 +90,7 @@ func main() {
 	shutdown := initOTel()
 	defer func() { _ = shutdown(context.Background()) }()
 
-	tracer = otel.Tracer("order-service")
+	tracer = otel.Tracer(serviceName)
 
 	mux := http.NewServeMux()
 	mux.Handle("/order", otelhttp.NewHandler(http.HandlerFunc(handleOrder), "POST /order"))
@@ -151,7 +153,7 @@ func handleOrder(w http.ResponseWriter, r *http.Request) {
 
 	span.AddEvent("order_completed", trace.WithAttributes(attribute.String("status", "success")))
 	if orderCounter != nil {
-		orderCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("service", "order-service")))
+		orderCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("service", serviceName)))
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("Order Placed Successfully"))

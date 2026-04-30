@@ -24,6 +24,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+const serviceName = "payment-service"
+
 var (
 	tracer         trace.Tracer
 	paymentCounter metric.Int64UpDownCounter
@@ -34,7 +36,7 @@ func initOTel() func(context.Context) error {
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceName("payment-service"),
+			semconv.ServiceName(serviceName),
 		),
 	)
 	if err != nil {
@@ -74,7 +76,7 @@ func initOTel() func(context.Context) error {
 	)
 	otel.SetMeterProvider(mp)
 
-	meter := otel.Meter("payment-service")
+	meter := otel.Meter(serviceName)
 	paymentCounter, _ = meter.Int64UpDownCounter("active_payments", metric.WithDescription("Current active payment requests"))
 
 	return func(ctx context.Context) error {
@@ -88,7 +90,7 @@ func main() {
 	shutdown := initOTel()
 	defer func() { _ = shutdown(context.Background()) }()
 
-	tracer = otel.Tracer("payment-service")
+	tracer = otel.Tracer(serviceName)
 
 	mux := http.NewServeMux()
 	mux.Handle("/pay", otelhttp.NewHandler(http.HandlerFunc(handlePay), "POST /pay"))

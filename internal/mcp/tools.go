@@ -7,7 +7,16 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/graphrag"
+	"github.com/RandomCodeSpace/otelcontext/internal/httpconst"
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
+)
+
+const (
+	descFilterByService     = "Filter by service name."
+	errSvcGraphNotInit      = "service graph not yet initialized"
+	errGraphRAGNotInit      = "GraphRAG not initialized"
+	errServiceRequired      = "service is required"
+	resourceURIPrefix       = "OtelContext://"
 )
 
 // toolDefs is the canonical list of all tools exposed by the OtelContext MCP server.
@@ -56,7 +65,7 @@ var toolDefs = []Tool{
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]Property{
-				"service":  {Type: "string", Description: "Filter by service name."},
+				"service":  {Type: "string", Description: descFilterByService},
 				"severity": {Type: "string", Description: "Filter by severity: ERROR, WARN, INFO, DEBUG."},
 				"limit":    {Type: "number", Description: "Number of recent entries to return (default 20, max 100)."},
 			},
@@ -79,7 +88,7 @@ var toolDefs = []Tool{
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]Property{
-				"service":         {Type: "string", Description: "Filter by service name."},
+				"service":         {Type: "string", Description: descFilterByService},
 				"status":          {Type: "string", Description: "Filter by status: OK, ERROR."},
 				"min_duration_ms": {Type: "number", Description: "Minimum trace duration in ms."},
 				"start":           {Type: "string", Description: "Start time RFC3339."},
@@ -95,7 +104,7 @@ var toolDefs = []Tool{
 			Type: "object",
 			Properties: map[string]Property{
 				"name":    {Type: "string", Description: "Metric name to query."},
-				"service": {Type: "string", Description: "Filter by service name."},
+				"service": {Type: "string", Description: descFilterByService},
 				"start":   {Type: "string", Description: "Start time RFC3339."},
 				"end":     {Type: "string", Description: "End time RFC3339."},
 			},
@@ -357,7 +366,7 @@ func (s *Server) toolGetSystemGraph(ctx context.Context, _ map[string]any) ToolC
 		return textResult(string(data))
 	}
 	if s.svcGraph == nil {
-		return errorResult("service graph not yet initialized")
+		return errorResult(errSvcGraphNotInit)
 	}
 	snap := s.svcGraph.Snapshot()
 	data, err := json.MarshalIndent(snap, "", "  ")
@@ -388,7 +397,7 @@ func (s *Server) toolGetServiceHealth(ctx context.Context, args map[string]any) 
 		return textResult(fmt.Sprintf("service %q not found in the current tenant window", svcName))
 	}
 	if s.svcGraph == nil {
-		return errorResult("service graph not yet initialized")
+		return errorResult(errSvcGraphNotInit)
 	}
 	snap := s.svcGraph.Snapshot()
 	node, ok := snap.Nodes[svcName]
@@ -485,7 +494,7 @@ func (s *Server) toolSearchLogs(ctx context.Context, args map[string]any) ToolCa
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to marshal search results: %v", err))
 	}
-	return resourceResult("OtelContext://logs/search", "application/json", string(data))
+	return resourceResult(resourceURIPrefix+"logs/search", httpconst.ContentTypeJSON, string(data))
 }
 
 func (s *Server) toolTailLogs(ctx context.Context, args map[string]any) ToolCallResult {
@@ -513,7 +522,7 @@ func (s *Server) toolTailLogs(ctx context.Context, args map[string]any) ToolCall
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to marshal tail results: %v", err))
 	}
-	return resourceResult("OtelContext://logs/tail", "application/json", string(data))
+	return resourceResult(resourceURIPrefix+"logs/tail", httpconst.ContentTypeJSON, string(data))
 }
 
 func (s *Server) toolGetTrace(ctx context.Context, args map[string]any) ToolCallResult {
@@ -529,7 +538,7 @@ func (s *Server) toolGetTrace(ctx context.Context, args map[string]any) ToolCall
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to marshal trace: %v", err))
 	}
-	return resourceResult("OtelContext://traces/"+traceID, "application/json", string(data))
+	return resourceResult(resourceURIPrefix+"traces/"+traceID, httpconst.ContentTypeJSON, string(data))
 }
 
 func (s *Server) toolSearchTraces(ctx context.Context, args map[string]any) ToolCallResult {
@@ -560,7 +569,7 @@ func (s *Server) toolSearchTraces(ctx context.Context, args map[string]any) Tool
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to marshal trace search results: %v", err))
 	}
-	return resourceResult("OtelContext://traces/search", "application/json", string(data))
+	return resourceResult(resourceURIPrefix+"traces/search", httpconst.ContentTypeJSON, string(data))
 }
 
 func (s *Server) toolGetMetrics(ctx context.Context, args map[string]any) ToolCallResult {
@@ -580,7 +589,7 @@ func (s *Server) toolGetMetrics(ctx context.Context, args map[string]any) ToolCa
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to marshal metrics: %v", err))
 	}
-	return resourceResult("OtelContext://metrics/query", "application/json", string(data))
+	return resourceResult(resourceURIPrefix+"metrics/query", httpconst.ContentTypeJSON, string(data))
 }
 
 func (s *Server) toolGetDashboardStats(ctx context.Context, args map[string]any) ToolCallResult {
@@ -645,7 +654,7 @@ func (s *Server) toolFindSimilarLogs(ctx context.Context, args map[string]any) T
 
 func (s *Server) toolGetAlerts() ToolCallResult {
 	if s.svcGraph == nil {
-		return errorResult("service graph not yet initialized")
+		return errorResult(errSvcGraphNotInit)
 	}
 	snap := s.svcGraph.Snapshot()
 	type alertEntry struct {
@@ -679,7 +688,7 @@ func (s *Server) toolGetAlerts() ToolCallResult {
 
 func (s *Server) toolGetServiceMap(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	depth := argInt(args, "depth", 3)
 	result := s.graphRAG.ServiceMap(mcpCtx(ctx), depth)
@@ -692,11 +701,11 @@ func (s *Server) toolGetServiceMap(ctx context.Context, args map[string]any) Too
 
 func (s *Server) toolGetErrorChains(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	svcName, _ := args["service"].(string)
 	if svcName == "" {
-		return errorResult("service is required")
+		return errorResult(errServiceRequired)
 	}
 	since := time.Now().Add(-15 * time.Minute)
 	parseTimeRange(args, "time_range", &since)
@@ -712,7 +721,7 @@ func (s *Server) toolGetErrorChains(ctx context.Context, args map[string]any) To
 
 func (s *Server) toolTraceGraph(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	traceID, _ := args["trace_id"].(string)
 	if traceID == "" {
@@ -729,7 +738,7 @@ func (s *Server) toolTraceGraph(ctx context.Context, args map[string]any) ToolCa
 		if err != nil {
 			return errorResult(fmt.Sprintf("failed to marshal trace: %v", err))
 		}
-		return resourceResult("OtelContext://traces/"+traceID, "application/json", string(data))
+		return resourceResult(resourceURIPrefix+"traces/"+traceID, httpconst.ContentTypeJSON, string(data))
 	}
 	data, err := json.MarshalIndent(spans, "", "  ")
 	if err != nil {
@@ -740,11 +749,11 @@ func (s *Server) toolTraceGraph(ctx context.Context, args map[string]any) ToolCa
 
 func (s *Server) toolImpactAnalysis(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	svcName, _ := args["service"].(string)
 	if svcName == "" {
-		return errorResult("service is required")
+		return errorResult(errServiceRequired)
 	}
 	depth := argInt(args, "depth", 5)
 	result := s.graphRAG.ImpactAnalysis(mcpCtx(ctx), svcName, depth)
@@ -757,11 +766,11 @@ func (s *Server) toolImpactAnalysis(ctx context.Context, args map[string]any) To
 
 func (s *Server) toolRootCauseAnalysis(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	svcName, _ := args["service"].(string)
 	if svcName == "" {
-		return errorResult("service is required")
+		return errorResult(errServiceRequired)
 	}
 	since := time.Now().Add(-15 * time.Minute)
 	parseTimeRange(args, "time_range", &since)
@@ -776,11 +785,11 @@ func (s *Server) toolRootCauseAnalysis(ctx context.Context, args map[string]any)
 
 func (s *Server) toolCorrelatedSignals(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	svcName, _ := args["service"].(string)
 	if svcName == "" {
-		return errorResult("service is required")
+		return errorResult(errServiceRequired)
 	}
 	since := time.Now().Add(-1 * time.Hour)
 	parseTimeRange(args, "time_range", &since)
@@ -795,7 +804,7 @@ func (s *Server) toolCorrelatedSignals(ctx context.Context, args map[string]any)
 
 func (s *Server) toolGetInvestigations(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	service, _ := args["service"].(string)
 	severity, _ := args["severity"].(string)
@@ -815,7 +824,7 @@ func (s *Server) toolGetInvestigations(ctx context.Context, args map[string]any)
 
 func (s *Server) toolGetInvestigationByID(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	id, _ := args["investigation_id"].(string)
 	if id == "" {
@@ -834,7 +843,7 @@ func (s *Server) toolGetInvestigationByID(ctx context.Context, args map[string]a
 
 func (s *Server) toolGetGraphSnapshot(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	var at time.Time
 	parseTime(args, "time", &at)
@@ -854,7 +863,7 @@ func (s *Server) toolGetGraphSnapshot(ctx context.Context, args map[string]any) 
 
 func (s *Server) toolGetAnomalyTimeline(ctx context.Context, args map[string]any) ToolCallResult {
 	if s.graphRAG == nil {
-		return errorResult("GraphRAG not initialized")
+		return errorResult(errGraphRAGNotInit)
 	}
 	since := time.Now().Add(-1 * time.Hour)
 	parseTime(args, "since", &since)

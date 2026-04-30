@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { ErrorBoundary } from '../ErrorBoundary'
 
-function Boom({ shouldThrow }: { shouldThrow: boolean }) {
+function Boom({ shouldThrow }: Readonly<{ shouldThrow: boolean }>) {
   if (shouldThrow) {
     throw new Error('kaboom-from-child')
   }
@@ -79,7 +79,7 @@ describe('ErrorBoundary', () => {
     )
     const calls = errorSpy.mock.calls as unknown[][]
     const tagged = calls.find(
-      (args) => typeof args[0] === 'string' && (args[0] as string).includes('[ErrorBoundary]'),
+      (args) => typeof args[0] === 'string' && args[0].includes('[ErrorBoundary]'),
     )
     expect(tagged).toBeDefined()
   })
