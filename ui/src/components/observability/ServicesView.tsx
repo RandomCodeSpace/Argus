@@ -71,10 +71,15 @@ const ServicesView: React.FC<ServicesViewProps> = ({
 
   const totalServices = dashboard?.active_services ?? nodes.length
   const errorRate = dashboard?.error_rate ?? 0
-  const totalTraces = dashboard?.total_traces ?? 0
-  const totalLogs = dashboard?.total_logs ?? 0
-  const dbMbRaw = (stats as Record<string, unknown> | null)?.DBSizeMB ?? stats?.db_size_mb
-  const dbMb = typeof dbMbRaw === 'string' ? Number(dbMbRaw) : (dbMbRaw as number | undefined)
+  const s = stats as Record<string, unknown> | null
+  const num = (v: unknown): number | undefined => {
+    if (typeof v === 'number') return v
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v)
+    return undefined
+  }
+  const totalTraces = num(s?.TraceCount) ?? num(s?.traceCount) ?? dashboard?.total_traces ?? 0
+  const totalLogs = num(s?.LogCount) ?? num(s?.logCount) ?? dashboard?.total_logs ?? 0
+  const dbMb = num(s?.DBSizeMB) ?? num(s?.db_size_mb)
 
   const handleNodeClick = (node: DSNode) => {
     const match = nodes.find((n) => n.id === node.id)
