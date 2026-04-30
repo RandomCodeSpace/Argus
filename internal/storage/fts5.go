@@ -1,8 +1,12 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 
 	"gorm.io/gorm"
@@ -111,9 +115,61 @@ func fts5MatchExpr(input string) string {
 	return strings.Join(parts, " ")
 }
 
-// fts5Available reports whether the given driver should use the FTS5 path. We
-// only enable FTS5 on SQLite because Postgres has its own pg_trgm GIN path
-// (see factory.go) and MySQL/SQL Server are out of scope.
+// fts5Available reports whether the given driver should use the FTS5 path.
+// FTS5 is only enabled when (a) the driver is SQLite (Postgres has its own
+// pg_trgm GIN path; MySQL/SQL Server are out of scope) and (b) LOG_FTS_ENABLED
+// is truthy. Default off — FTS5's inverted index typically consumes 30-40% of
+// SQLite DB disk for log-heavy workloads, and the LIKE fallback at
+// log_repo.go:105 keeps search_logs functional without it.
 func fts5Available(driver string) bool {
-	return strings.ToLower(driver) == "sqlite"
+	if !strings.EqualFold(driver, "sqlite") {
+		return false
+	}
+	return logFTSEnabledFromEnv()
+}
+
+// logFTSEnabledFromEnv reads LOG_FTS_ENABLED and reports whether the FTS5
+// virtual table + triggers should be installed and queried. Defaults to
+// false; opt in with LOG_FTS_ENABLED=true (also accepts yes/on/1).
+func logFTSEnabledFromEnv() bool {
+	v, ok := os.LookupEnv("LOG_FTS_ENABLED")
+	if !ok {
+		return false
+	}
+	if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
+		return b
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "yes", "y", "on":
+		return true
+	}
+	return false
+}
+
+// DropLogsFTS removes the FTS5 virtual table and its sync triggers, then runs
+// VACUUM to reclaim freed pages. Used by /api/admin/drop_fts on existing
+// SQLite deployments after LOG_FTS_ENABLED has been set to false, to recover
+// the 30-40% of DB disk the inverted index occupied.
+//
+// VACUUM blocks writes for ~10-60 minutes on a multi-GB DB and cannot run
+// inside a transaction. Idempotent — safe to call when the FTS5 table or
+// triggers are already absent.
+func (r *Repository) DropLogsFTS(ctx context.Context) error {
+	if !strings.EqualFold(r.driver, "sqlite") {
+		return fmt.Errorf("DropLogsFTS only supported on SQLite, got driver=%q", r.driver)
+	}
+	db := r.db.WithContext(ctx)
+	for _, name := range []string{"logs_au", "logs_ad", "logs_ai"} {
+		if err := db.Exec("DROP TRIGGER IF EXISTS " + name).Error; err != nil {
+			return fmt.Errorf("drop trigger %s: %w", name, err)
+		}
+	}
+	if err := db.Exec("DROP TABLE IF EXISTS " + fts5LogsTable).Error; err != nil {
+		return fmt.Errorf("drop table %s: %w", fts5LogsTable, err)
+	}
+	if err := db.Exec("VACUUM").Error; err != nil {
+		return fmt.Errorf("vacuum: %w", err)
+	}
+	slog.Info("FTS5 logs index dropped and DB vacuumed")
+	return nil
 }

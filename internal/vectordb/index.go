@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 )
 
@@ -22,13 +23,18 @@ const defaultTenantID = "default"
 // rows. The TF-IDF table is shared across tenants — global IDF still gives
 // the right rarity signal — but the per-document tenant tag is enforced at
 // query time so two tenants with overlapping log bodies stay isolated.
+//
+// All fields are exported so encoding/gob can serialize the type for
+// snapshot persistence (snapshot.go). Vec is the per-doc TF map (term →
+// frequency); IDF is held separately on the Index to avoid duplicating
+// rarity weights across documents.
 type LogVector struct {
 	LogID       uint
 	Tenant      string
 	ServiceName string
 	Severity    string
 	Body        string
-	vec         map[string]float64 // TF-IDF sparse vector
+	Vec         map[string]float64 // TF-IDF sparse vector
 }
 
 // SearchResult is a single similarity hit.
@@ -43,12 +49,24 @@ type SearchResult struct {
 
 // Index is a thread-safe in-memory TF-IDF vector index for log bodies.
 // Only ERROR and WARN logs are indexed to keep it small and relevant.
+//
+// lastIndexedID records the highest Log.ID Add() has accepted. Persisted
+// in the snapshot so a startup tail-replay can pick up DB rows newer than
+// this watermark without re-indexing rows already in the snapshot. Tracked
+// only for rows that pass shouldIndex(); INFO/DEBUG rows interleaved in
+// the same ID range are excluded by the severity filter on replay anyway.
 type Index struct {
-	mu      sync.RWMutex
-	docs    []LogVector        // indexed log vectors
-	idf     map[string]float64 // global IDF table
-	maxSize int                // FIFO eviction cap
-	dirty   bool               // IDF needs recompute
+	mu            sync.RWMutex
+	docs          []LogVector        // indexed log vectors
+	idf           map[string]float64 // global IDF table
+	maxSize       int                // FIFO eviction cap
+	dirty         bool               // IDF needs recompute
+	lastIndexedID uint               // high watermark of indexed Log.ID
+
+	// snapshotObserver is invoked at the end of each WriteSnapshot
+	// (success or failure). nil-safe — set via SetSnapshotObserver from
+	// the wiring layer so vectordb stays free of telemetry imports.
+	snapshotObserver func(result string, duration time.Duration, size int64)
 }
 
 // New creates a new Index with the given maximum entry cap.
@@ -81,6 +99,14 @@ func (idx *Index) Add(logID uint, tenant, serviceName, severity, body string) {
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
+
+	// High watermark for tail-replay correctness. Bump only after the
+	// shouldIndex/tokenize gates pass — the replay query is severity-
+	// filtered too, so non-indexed rows interleaved in the same ID range
+	// are excluded by SQL anyway.
+	if logID > idx.lastIndexedID {
+		idx.lastIndexedID = logID
+	}
 
 	// Tenant-aware FIFO eviction. When at cap, remove up to maxSize/10 of the
 	// oldest entries belonging to the inserting tenant so a noisy tenant
@@ -120,7 +146,7 @@ func (idx *Index) Add(logID uint, tenant, serviceName, severity, body string) {
 		ServiceName: serviceName,
 		Severity:    severity,
 		Body:        body,
-		vec:         tf,
+		Vec:         tf,
 	})
 	idx.dirty = true
 }
@@ -175,8 +201,8 @@ func (idx *Index) Search(tenant, query string, k int) []SearchResult {
 		if doc.Tenant != tenant {
 			continue
 		}
-		docVec := make(map[string]float64, len(doc.vec))
-		for term, tf := range doc.vec {
+		docVec := make(map[string]float64, len(doc.Vec))
+		for term, tf := range doc.Vec {
 			docVec[term] = tf * idfSnap[term]
 		}
 		score := cosineSimilarity(queryVec, queryNorm, docVec)
@@ -213,11 +239,21 @@ func (idx *Index) Size() int {
 	return len(idx.docs)
 }
 
+// LastIndexedID returns the highest Log.ID that has been successfully indexed
+// (i.e. passed shouldIndex + tokenize gates and was appended to docs).
+// Used by the startup tail-replay path to query DB rows newer than this
+// watermark; persisted in the snapshot so replay survives restarts.
+func (idx *Index) LastIndexedID() uint {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.lastIndexedID
+}
+
 // recomputeIDF rebuilds the IDF table from current docs. Must be called with mu held.
 func (idx *Index) recomputeIDF() {
 	df := make(map[string]int, len(idx.idf))
 	for _, doc := range idx.docs {
-		for term := range doc.vec {
+		for term := range doc.Vec {
 			df[term]++
 		}
 	}

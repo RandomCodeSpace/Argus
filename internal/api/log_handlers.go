@@ -47,6 +47,19 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// When the caller is doing a body keyword search, enforce the same 24h
+	// cap as the MCP search_logs tool so a direct HTTP caller cannot bypass
+	// via the alternate transport. Pure filtered listings (no search term)
+	// keep the full retention range.
+	if filter.Search != "" {
+		cs, ce, err := storage.ClampSearchWindowTo24h(filter.StartTime, filter.EndTime, time.Now())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		filter.StartTime, filter.EndTime = cs, ce
+	}
+
 	logs, total, err := s.repo.GetLogsV2(r.Context(), filter)
 	if err != nil {
 		slog.Error("Failed to get logs", "error", err)
