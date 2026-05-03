@@ -28,7 +28,9 @@ export function useLogs() {
     }
   }, [])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    load().catch(() => undefined)
+  }, [load])
 
   const runSimilar = async (query: string) => {
     if (!query.trim()) return

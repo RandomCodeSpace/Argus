@@ -241,8 +241,9 @@ func TestPGPartition_SchedulerDropsExpiredAndCreatesLookahead(t *testing.T) {
 	sched.SetMetrics(func(n int) { dropped += n }, func(n int) { active = n })
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	sched.Start(ctx)
-	defer func() { cancel(); sched.Stop() }()
+	defer sched.Stop()
 
 	if dropped < 1 {
 		t.Fatalf("scheduler initial pass should have dropped >=1 expired partition; got %d", dropped)

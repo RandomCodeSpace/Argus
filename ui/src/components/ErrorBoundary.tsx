@@ -31,19 +31,19 @@ export class ErrorBoundary extends Component<Props, State> {
       name: error.name,
       stack: error.stack,
       componentStack: info.componentStack,
-      url: typeof window !== 'undefined' ? window.location.href : undefined,
-      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+      url: typeof window === 'undefined' ? undefined : window.location.href,
+      userAgent: typeof navigator === 'undefined' ? undefined : navigator.userAgent,
       timestamp: new Date().toISOString(),
     })
     // TODO(telemetry): forward to server when useWebSocket exposes a send()
     // API, or via a dedicated POST /api/client-errors endpoint.
   }
 
-  private reset = (): void => {
+  private readonly reset = (): void => {
     this.setState({ error: null, info: null })
   }
 
-  private reload = (): void => {
+  private readonly reload = (): void => {
     if (typeof window !== 'undefined') {
       window.location.reload()
     }

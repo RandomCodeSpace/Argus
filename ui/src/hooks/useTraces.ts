@@ -25,7 +25,9 @@ export function useTraces() {
     }
   }, [])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    load().catch(() => undefined)
+  }, [load])
 
   const selectTrace = async (traceId: string) => {
     const res = await fetch(`/api/traces/${traceId}`)

@@ -182,9 +182,9 @@ func (r *Repository) GetDashboardStats(ctx context.Context, start, end time.Time
 	tenant := TenantFromContext(ctx)
 	var stats DashboardStats
 
-	baseQuery := r.db.WithContext(ctx).Model(&Trace{}).Where("tenant_id = ? AND timestamp BETWEEN ? AND ?", tenant, start, end)
+	baseQuery := r.db.WithContext(ctx).Model(&Trace{}).Where(sqlWhereTenantTimeBetween, tenant, start, end)
 	if len(serviceNames) > 0 {
-		baseQuery = baseQuery.Where("service_name IN ?", serviceNames)
+		baseQuery = baseQuery.Where(sqlWhereServiceIn, serviceNames)
 	}
 
 	// 1. Total Traces
@@ -193,9 +193,9 @@ func (r *Repository) GetDashboardStats(ctx context.Context, start, end time.Time
 	}
 
 	// 2. Total Logs
-	logQuery := r.db.WithContext(ctx).Model(&Log{}).Where("tenant_id = ? AND timestamp BETWEEN ? AND ?", tenant, start, end)
+	logQuery := r.db.WithContext(ctx).Model(&Log{}).Where(sqlWhereTenantTimeBetween, tenant, start, end)
 	if len(serviceNames) > 0 {
-		logQuery = logQuery.Where("service_name IN ?", serviceNames)
+		logQuery = logQuery.Where(sqlWhereServiceIn, serviceNames)
 	}
 	if err := logQuery.Count(&stats.TotalLogs).Error; err != nil {
 		return nil, fmt.Errorf("failed to count logs: %w", err)
@@ -290,7 +290,7 @@ func (r *Repository) GetTrafficMetrics(ctx context.Context, start, end time.Time
 		Where("tenant_id = ? AND timestamp BETWEEN ? AND ?", tenant, start, end)
 
 	if len(serviceNames) > 0 {
-		query = query.Where("service_name IN ?", serviceNames)
+		query = query.Where(sqlWhereServiceIn, serviceNames)
 	}
 
 	if err := query.Find(&rows).Error; err != nil {
@@ -340,7 +340,7 @@ func (r *Repository) GetLatencyHeatmap(ctx context.Context, start, end time.Time
 		Where("tenant_id = ? AND timestamp BETWEEN ? AND ?", tenant, start, end)
 
 	if len(serviceNames) > 0 {
-		query = query.Where("service_name IN ?", serviceNames)
+		query = query.Where(sqlWhereServiceIn, serviceNames)
 	}
 
 	if err := query.Order("timestamp DESC").Limit(2000).Find(&points).Error; err != nil {

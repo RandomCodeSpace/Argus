@@ -147,7 +147,7 @@ func TestConcurrentMatchRaceFree(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < per; i++ {
 				line := fmt.Sprintf("worker %d processed request id=%d from 10.0.0.%d", wid, i, i%250)
-				if tpl := d.Match(line, ts); tpl == nil {
+				if d.Match(line, ts) == nil {
 					t.Errorf("nil template")
 					return
 				}

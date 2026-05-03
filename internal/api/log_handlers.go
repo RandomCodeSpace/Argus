@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/api/views"
+	"github.com/RandomCodeSpace/otelcontext/internal/httpconst"
 	"github.com/RandomCodeSpace/otelcontext/internal/realtime"
 	"github.com/RandomCodeSpace/otelcontext/internal/storage"
 )
@@ -67,7 +68,7 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"data":  views.LogsFromModels(logs),
 		"total": total,
@@ -96,7 +97,7 @@ func (s *Server) handleGetLogContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(views.LogsFromModels(logs))
 }
 
@@ -120,7 +121,7 @@ func (s *Server) handleGetLogInsight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]string{"insight": string(l.AIInsight)})
 }
 

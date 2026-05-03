@@ -33,7 +33,7 @@ const menuItems = [
   { key: 'mcp' as const, label: 'MCP Endpoint', icon: <Terminal size={14} /> },
 ]
 
-export default function TopNav({ view, onNavigate, wsConnected }: TopNavProps) {
+export default function TopNav({ view, onNavigate, wsConnected }: Readonly<TopNavProps>) {
   const { theme, toggle } = useTheme()
   const isCompact = useMediaQuery('(max-width: 760px)')
   const [drawerOpen, setDrawerOpen] = useState(false)

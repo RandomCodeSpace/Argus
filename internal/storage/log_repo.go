@@ -44,7 +44,7 @@ func (r *Repository) BatchCreateLogs(logs []Log) error {
 func (r *Repository) GetLog(ctx context.Context, id uint) (*Log, error) {
 	tenant := TenantFromContext(ctx)
 	var l Log
-	if err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).First(&l, id).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where(sqlWhereTenantID, tenant).First(&l, id).Error; err != nil {
 		return nil, fmt.Errorf("failed to get log: %w", err)
 	}
 	return &l, nil
@@ -54,7 +54,7 @@ func (r *Repository) GetLog(ctx context.Context, id uint) (*Log, error) {
 func (r *Repository) GetRecentLogs(ctx context.Context, limit int) ([]Log, error) {
 	tenant := TenantFromContext(ctx)
 	var logs []Log
-	if err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant).Order("timestamp desc").Limit(limit).Find(&logs).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where(sqlWhereTenantID, tenant).Order(sqlOrderTimestampDesc).Limit(limit).Find(&logs).Error; err != nil {
 		return nil, fmt.Errorf("failed to get recent logs: %w", err)
 	}
 	return logs, nil
@@ -81,34 +81,20 @@ func (r *Repository) GetLogsV2(ctx context.Context, filter LogFilter) ([]Log, in
 		}
 	}
 
-	base := r.db.WithContext(ctx).Model(&Log{}).Where("tenant_id = ?", tenant)
+	base := r.db.WithContext(ctx).Model(&Log{}).Where(sqlWhereTenantID, tenant)
 	if useFTS5 {
 		base = base.Joins("JOIN "+fts5LogsTable+" ON logs.id = "+fts5LogsTable+".rowid").
 			Where(fts5LogsTable+" MATCH ?", matchExpr)
 	}
 
-	if filter.ServiceName != "" {
-		base = base.Where("service_name = ?", filter.ServiceName)
-	}
-	if filter.Severity != "" {
-		base = base.Where("severity = ?", filter.Severity)
-	}
-	if filter.TraceID != "" {
-		base = base.Where("trace_id = ?", filter.TraceID)
-	}
-	if !filter.StartTime.IsZero() {
-		base = base.Where("timestamp >= ?", filter.StartTime)
-	}
-	if !filter.EndTime.IsZero() {
-		base = base.Where("timestamp <= ?", filter.EndTime)
-	}
+	base = applyLogFilterCriteria(base, filter)
 	if filter.Search != "" && !useFTS5 {
 		search := "%" + filter.Search + "%"
 		op := r.likeOp()
 		base = base.Where(fmt.Sprintf("body %s ? OR trace_id %s ?", op, op), search, search)
 	}
 
-	orderBy := "timestamp desc"
+	orderBy := sqlOrderTimestampDesc
 	if useFTS5 {
 		orderBy = "bm25(" + fts5LogsTable + ") ASC"
 	}
@@ -139,28 +125,36 @@ func (r *Repository) GetLogsV2(ctx context.Context, filter LogFilter) ([]Log, in
 	return logs, total, nil
 }
 
+// applyLogFilterCriteria appends the non-search WHERE clauses that are common
+// to GetLogsV2 and its LIKE fallback. The Search clause is intentionally NOT
+// applied here — the two callers handle it differently (FTS5 MATCH vs LIKE).
+func applyLogFilterCriteria(base *gorm.DB, filter LogFilter) *gorm.DB {
+	if filter.ServiceName != "" {
+		base = base.Where("service_name = ?", filter.ServiceName)
+	}
+	if filter.Severity != "" {
+		base = base.Where(sqlWhereSeverity, filter.Severity)
+	}
+	if filter.TraceID != "" {
+		base = base.Where("trace_id = ?", filter.TraceID)
+	}
+	if !filter.StartTime.IsZero() {
+		base = base.Where(sqlWhereTimestampGTE, filter.StartTime)
+	}
+	if !filter.EndTime.IsZero() {
+		base = base.Where(sqlWhereTimestampLTE, filter.EndTime)
+	}
+	return base
+}
+
 // getLogsV2LikeFallback re-runs the query using LIKE against body/trace_id —
 // used when the FTS5 path errors out so the API never serves a 500 because of
 // an index-layer hiccup.
 func (r *Repository) getLogsV2LikeFallback(ctx context.Context, filter LogFilter, tenant string) ([]Log, int64, error) {
 	var logs []Log
 	var total int64
-	base := r.db.WithContext(ctx).Model(&Log{}).Where("tenant_id = ?", tenant)
-	if filter.ServiceName != "" {
-		base = base.Where("service_name = ?", filter.ServiceName)
-	}
-	if filter.Severity != "" {
-		base = base.Where("severity = ?", filter.Severity)
-	}
-	if filter.TraceID != "" {
-		base = base.Where("trace_id = ?", filter.TraceID)
-	}
-	if !filter.StartTime.IsZero() {
-		base = base.Where("timestamp >= ?", filter.StartTime)
-	}
-	if !filter.EndTime.IsZero() {
-		base = base.Where("timestamp <= ?", filter.EndTime)
-	}
+	base := r.db.WithContext(ctx).Model(&Log{}).Where(sqlWhereTenantID, tenant)
+	base = applyLogFilterCriteria(base, filter)
 	if filter.Search != "" {
 		search := "%" + filter.Search + "%"
 		op := r.likeOp()
@@ -170,7 +164,7 @@ func (r *Repository) getLogsV2LikeFallback(ctx context.Context, filter LogFilter
 	g.Go(func() error { return base.Session(&gorm.Session{}).Count(&total).Error })
 	g.Go(func() error {
 		return base.Session(&gorm.Session{}).
-			Order("timestamp desc").Limit(filter.Limit).Offset(filter.Offset).Find(&logs).Error
+			Order(sqlOrderTimestampDesc).Limit(filter.Limit).Offset(filter.Offset).Find(&logs).Error
 	})
 	if err := g.Wait(); err != nil {
 		return nil, 0, fmt.Errorf("failed to fetch logs (fallback): %w", err)
@@ -252,16 +246,16 @@ func (r *Repository) ListRecentHighSeverityLogsAllTenants(ctx context.Context, s
 	}
 	q := r.db.WithContext(ctx).Model(&Log{})
 	if severity != "" {
-		q = q.Where("severity = ?", severity)
+		q = q.Where(sqlWhereSeverity, severity)
 	}
 	if !since.IsZero() {
-		q = q.Where("timestamp >= ?", since)
+		q = q.Where(sqlWhereTimestampGTE, since)
 	}
 	if !until.IsZero() {
-		q = q.Where("timestamp <= ?", until)
+		q = q.Where(sqlWhereTimestampLTE, until)
 	}
 	var logs []Log
-	if err := q.Order("timestamp desc").Limit(limit).Find(&logs).Error; err != nil {
+	if err := q.Order(sqlOrderTimestampDesc).Limit(limit).Find(&logs).Error; err != nil {
 		return nil, fmt.Errorf("failed to list recent logs all tenants: %w", err)
 	}
 	return logs, nil

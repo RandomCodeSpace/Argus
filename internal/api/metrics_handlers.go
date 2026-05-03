@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/RandomCodeSpace/otelcontext/internal/api/views"
+	"github.com/RandomCodeSpace/otelcontext/internal/httpconst"
 )
 
 // handleGetTrafficMetrics handles GET /api/metrics/traffic
@@ -35,7 +36,7 @@ func (s *Server) handleGetTrafficMetrics(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(points)
 }
 
@@ -64,7 +65,7 @@ func (s *Server) handleGetLatencyHeatmap(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(points)
 }
 
@@ -94,7 +95,7 @@ func (s *Server) handleGetDashboardStats(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(views.DashboardStatsFromModel(stats))
 }
 
@@ -121,7 +122,7 @@ func (s *Server) handleGetServiceMapMetrics(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(views.ServiceMapMetricsFromModel(metrics))
 }
 
@@ -149,7 +150,7 @@ func (s *Server) handleGetMetricBuckets(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(views.MetricBucketsFromModels(buckets))
 }
 
@@ -164,7 +165,7 @@ func (s *Server) handleGetMetricNames(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(names)
 }
 
@@ -186,6 +187,6 @@ func (s *Server) handleGetServices(w http.ResponseWriter, r *http.Request) {
 	if services == nil {
 		services = []string{}
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(httpconst.HeaderContentType, httpconst.ContentTypeJSON)
 	_ = json.NewEncoder(w).Encode(services)
 }

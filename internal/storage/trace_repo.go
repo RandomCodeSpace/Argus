@@ -147,8 +147,8 @@ func (r *Repository) GetTrace(ctx context.Context, traceID string) (*Trace, erro
 	tenant := TenantFromContext(ctx)
 	var trace Trace
 	if err := r.db.WithContext(ctx).
-		Preload("Spans", "tenant_id = ?", tenant).
-		Preload("Logs", "tenant_id = ?", tenant).
+		Preload("Spans", sqlWhereTenantID, tenant).
+		Preload("Logs", sqlWhereTenantID, tenant).
 		Where("tenant_id = ? AND trace_id = ?", tenant, traceID).
 		First(&trace).Error; err != nil {
 		return nil, fmt.Errorf("failed to get trace: %w", err)
@@ -171,7 +171,7 @@ func (r *Repository) GetTracesFiltered(ctx context.Context, start, end time.Time
 	var traces []Trace
 	var total int64
 
-	base := r.db.WithContext(ctx).Model(&Trace{}).Where("tenant_id = ?", tenant)
+	base := r.db.WithContext(ctx).Model(&Trace{}).Where(sqlWhereTenantID, tenant)
 
 	if !start.IsZero() && !end.IsZero() {
 		base = base.Where("timestamp BETWEEN ? AND ?", start, end)
@@ -262,7 +262,7 @@ const serviceMapSpanLimit = 500_000
 func (r *Repository) GetServiceMapMetrics(ctx context.Context, start, end time.Time) (*ServiceMapMetrics, error) {
 	tenant := TenantFromContext(ctx)
 	var spans []Span
-	query := r.db.WithContext(ctx).Model(&Span{}).Where("tenant_id = ?", tenant)
+	query := r.db.WithContext(ctx).Model(&Span{}).Where(sqlWhereTenantID, tenant)
 
 	if !start.IsZero() && !end.IsZero() {
 		query = query.Where("start_time BETWEEN ? AND ?", start, end)
