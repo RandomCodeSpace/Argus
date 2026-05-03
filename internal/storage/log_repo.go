@@ -87,21 +87,7 @@ func (r *Repository) GetLogsV2(ctx context.Context, filter LogFilter) ([]Log, in
 			Where(fts5LogsTable+" MATCH ?", matchExpr)
 	}
 
-	if filter.ServiceName != "" {
-		base = base.Where("service_name = ?", filter.ServiceName)
-	}
-	if filter.Severity != "" {
-		base = base.Where(sqlWhereSeverity, filter.Severity)
-	}
-	if filter.TraceID != "" {
-		base = base.Where("trace_id = ?", filter.TraceID)
-	}
-	if !filter.StartTime.IsZero() {
-		base = base.Where(sqlWhereTimestampGTE, filter.StartTime)
-	}
-	if !filter.EndTime.IsZero() {
-		base = base.Where(sqlWhereTimestampLTE, filter.EndTime)
-	}
+	base = applyLogFilterCriteria(base, filter)
 	if filter.Search != "" && !useFTS5 {
 		search := "%" + filter.Search + "%"
 		op := r.likeOp()
@@ -139,13 +125,10 @@ func (r *Repository) GetLogsV2(ctx context.Context, filter LogFilter) ([]Log, in
 	return logs, total, nil
 }
 
-// getLogsV2LikeFallback re-runs the query using LIKE against body/trace_id —
-// used when the FTS5 path errors out so the API never serves a 500 because of
-// an index-layer hiccup.
-func (r *Repository) getLogsV2LikeFallback(ctx context.Context, filter LogFilter, tenant string) ([]Log, int64, error) {
-	var logs []Log
-	var total int64
-	base := r.db.WithContext(ctx).Model(&Log{}).Where(sqlWhereTenantID, tenant)
+// applyLogFilterCriteria appends the non-search WHERE clauses that are common
+// to GetLogsV2 and its LIKE fallback. The Search clause is intentionally NOT
+// applied here — the two callers handle it differently (FTS5 MATCH vs LIKE).
+func applyLogFilterCriteria(base *gorm.DB, filter LogFilter) *gorm.DB {
 	if filter.ServiceName != "" {
 		base = base.Where("service_name = ?", filter.ServiceName)
 	}
@@ -161,6 +144,17 @@ func (r *Repository) getLogsV2LikeFallback(ctx context.Context, filter LogFilter
 	if !filter.EndTime.IsZero() {
 		base = base.Where(sqlWhereTimestampLTE, filter.EndTime)
 	}
+	return base
+}
+
+// getLogsV2LikeFallback re-runs the query using LIKE against body/trace_id —
+// used when the FTS5 path errors out so the API never serves a 500 because of
+// an index-layer hiccup.
+func (r *Repository) getLogsV2LikeFallback(ctx context.Context, filter LogFilter, tenant string) ([]Log, int64, error) {
+	var logs []Log
+	var total int64
+	base := r.db.WithContext(ctx).Model(&Log{}).Where(sqlWhereTenantID, tenant)
+	base = applyLogFilterCriteria(base, filter)
 	if filter.Search != "" {
 		search := "%" + filter.Search + "%"
 		op := r.likeOp()

@@ -12,11 +12,10 @@ import (
 )
 
 const (
-	descFilterByService     = "Filter by service name."
-	errSvcGraphNotInit      = "service graph not yet initialized"
-	errGraphRAGNotInit      = "GraphRAG not initialized"
-	errServiceRequired      = "service is required"
-	resourceURIPrefix       = "OtelContext://"
+	errSvcGraphNotInit = "service graph not yet initialized"
+	errGraphRAGNotInit = "GraphRAG not initialized"
+	errServiceRequired = "service is required"
+	resourceURIPrefix  = "OtelContext://"
 )
 
 // toolDefs is the canonical list of all tools exposed by the OtelContext MCP server.
@@ -65,7 +64,7 @@ var toolDefs = []Tool{
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]Property{
-				"service":  {Type: "string", Description: descFilterByService},
+				"service":  {Type: "string", Description: "Filter by service name."},
 				"severity": {Type: "string", Description: "Filter by severity: ERROR, WARN, INFO, DEBUG."},
 				"limit":    {Type: "number", Description: "Number of recent entries to return (default 20, max 100)."},
 			},
@@ -88,7 +87,7 @@ var toolDefs = []Tool{
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]Property{
-				"service":         {Type: "string", Description: descFilterByService},
+				"service":         {Type: "string", Description: "Filter by service name."},
 				"status":          {Type: "string", Description: "Filter by status: OK, ERROR."},
 				"min_duration_ms": {Type: "number", Description: "Minimum trace duration in ms."},
 				"start":           {Type: "string", Description: "Start time RFC3339."},
@@ -104,7 +103,7 @@ var toolDefs = []Tool{
 			Type: "object",
 			Properties: map[string]Property{
 				"name":    {Type: "string", Description: "Metric name to query."},
-				"service": {Type: "string", Description: descFilterByService},
+				"service": {Type: "string", Description: "Filter by service name."},
 				"start":   {Type: "string", Description: "Start time RFC3339."},
 				"end":     {Type: "string", Description: "End time RFC3339."},
 			},

@@ -24,8 +24,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const serviceName = "inventory-service"
-
 var (
 	tracer           trace.Tracer
 	inventoryCounter metric.Int64Counter
@@ -36,7 +34,7 @@ func initOTel() func(context.Context) error {
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceName(serviceName),
+			semconv.ServiceName("inventory-service"),
 		),
 	)
 	if err != nil {
@@ -76,7 +74,7 @@ func initOTel() func(context.Context) error {
 	)
 	otel.SetMeterProvider(mp)
 
-	meter := otel.Meter(serviceName)
+	meter := otel.Meter("inventory-service")
 	inventoryCounter, _ = meter.Int64Counter("inventory_queries_total", metric.WithDescription("Total number of inventory checks"))
 
 	return func(ctx context.Context) error {
@@ -90,7 +88,7 @@ func main() {
 	shutdown := initOTel()
 	defer func() { _ = shutdown(context.Background()) }()
 
-	tracer = otel.Tracer(serviceName)
+	tracer = otel.Tracer("inventory-service")
 
 	mux := http.NewServeMux()
 	mux.Handle("/check", otelhttp.NewHandler(http.HandlerFunc(handleCheckInventory), "POST /check"))
